@@ -6,6 +6,22 @@ import { Spine } from 'pixi-spine';
 // CONFIG
 // All magic numbers in one place so they're easy to tweak.
 // ─────────────────────────────────────────────────────────────────
+const meows = [
+  new Audio('/assets/meow1.mp3'),
+  new Audio('/assets/meow2.mp3'),
+  new Audio('/assets/meow3.mp3'),
+  new Audio('/assets/meow4.mp3'),
+  new Audio('/assets/meow5.mp3'),
+  new Audio('/assets/meow6.mp3'),
+  new Audio('/assets/meow7.mp3'),
+];
+
+const playMeow = () => {
+  const sound = meows[Math.floor(Math.random() * meows.length)];
+  sound.currentTime = 0; // rewind if already playing
+  sound.volume = 0.7;
+  sound.play().catch(() => {}); 
+};
 const CONFIG = {
   WIDTH:  800,
   HEIGHT: 600,
@@ -104,6 +120,17 @@ const Game = () => {
  
     let ctrlConsumed = false;
     let sitTogglePending = false; // used by mobile sit button
+     const bgMusic = new Audio('/assets/bg.mp3');
+    bgMusic.loop   = true;
+    bgMusic.volume = 0.01;
+   const startMusic = () => {
+  bgMusic.play().catch(() => {});
+  window.removeEventListener('keydown', startMusic);
+  window.removeEventListener('pointerdown', startMusic);
+};
+
+window.addEventListener('keydown',    startMusic);
+window.addEventListener('pointerdown', startMusic);
  
     // ── Accelerometer / shake ─────────────────────────────────────
     // DeviceMotionEvent gives acceleration in m/s² on each axis.
@@ -331,6 +358,7 @@ const Game = () => {
             return;
           }
           // Drag
+          playMeow();
           drag.active  = true;
           drag.offsetX = container.x - e.data.global.x;
           drag.offsetY = container.y - e.data.global.y;
