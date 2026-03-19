@@ -90,11 +90,85 @@ const Game = () => {
     purr.volume = CONFIG.PURR_VOLUME;
  
     // ── Input ─────────────────────────────────────────────────────
+    // virtualKeys is shared between keyboard and on-screen buttons.
+    // Buttons call pressKey/releaseKey exactly like keyboard events,
+    // so the game ticker doesn't need to know the input source.
     const keys = new Set();
  
-    // We track whether Ctrl was *just* pressed (not held) using a flag.
-    // Without this, holding Ctrl would toggle sit on every frame.
+    const pressKey   = (code) => keys.add(code);
+    const releaseKey = (code) => keys.delete(code);
+ 
+    // Expose to React buttons via refs
+    const virtualKeys = { pressKey, releaseKey };
+    window.__catVirtualKeys = virtualKeys; // used by JSX buttons below
+ 
     let ctrlConsumed = false;
+    let sitTogglePending = false; // used by mobile sit button
+ 
+    // ── Accelerometer / shake ─────────────────────────────────────
+    // DeviceMotionEvent gives acceleration in m/s² on each axis.
+    // A shake is detected when the total acceleration spike exceeds
+    // SHAKE_THRESHOLD. We track lastAcc to compute delta — a sudden
+    // change (not just high acceleration) means shake.
+    // shakeCooldown prevents multiple triggers from one shake gesture.
+    const SHAKE_THRESHOLD = 18;  // m/s² delta — tweak if too sensitive
+    const SHAKE_COOLDOWN  = 500; // ms between shake reactions
+ 
+    let lastAcc       = { x: 0, y: 0, z: 0 };
+    let lastShakeTime = 0;
+    let shakeIntensity = 0; // 0–1, decays each frame, drives visual shake
+ 
+    // iOS 13+ requires permission for DeviceMotionEvent
+    const requestMotionPermission = async () => {
+      if (typeof DeviceMotionEvent === 'undefined') {
+        console.log('[ACCEL] DeviceMotionEvent not supported');
+        return;
+      }
+      if (typeof DeviceMotionEvent.requestPermission === 'function') {
+        // iOS 13+
+        try {
+          const permission = await DeviceMotionEvent.requestPermission();
+          if (permission !== 'granted') {
+            console.log('[ACCEL] Permission denied');
+            return;
+          }
+          console.log('[ACCEL] iOS permission granted');
+        } catch (err) {
+          console.log('[ACCEL] Permission request failed:', err);
+          return;
+        }
+      }
+      window.addEventListener('devicemotion', onDeviceMotion);
+      console.log('[ACCEL] Listening for device motion');
+    };
+ 
+    const onDeviceMotion = (e) => {
+      const acc = e.accelerationIncludingGravity;
+      if (!acc) return;
+ 
+      const dx    = (acc.x || 0) - lastAcc.x;
+      const dy    = (acc.y || 0) - lastAcc.y;
+      const dz    = (acc.z || 0) - lastAcc.z;
+      const delta = Math.sqrt(dx * dx + dy * dy + dz * dz);
+ 
+      lastAcc = { x: acc.x || 0, y: acc.y || 0, z: acc.z || 0 };
+ 
+      const now = Date.now();
+      if (delta > SHAKE_THRESHOLD && now - lastShakeTime > SHAKE_COOLDOWN) {
+        lastShakeTime  = now;
+        shakeIntensity = 1; // will decay in ticker
+        console.log(`[ACCEL] Shake detected! delta=${delta.toFixed(1)}`);
+      }
+    };
+ 
+    // Request permission on first user interaction (required by iOS)
+    // We attach it to the canvas click/touch since the user will
+    // tap there first anyway.
+    const requestOnInteraction = () => {
+      requestMotionPermission();
+      window.removeEventListener('pointerdown', requestOnInteraction);
+    };
+    window.addEventListener('pointerdown', requestOnInteraction);
  
     const onKeyDown = (e) => {
       keys.add(e.code);
@@ -102,7 +176,6 @@ const Game = () => {
         ctrlConsumed = true;
         console.log('[INPUT] Ctrl pressed — will toggle sit on next tick');
       }
-      // Prevent browser shortcuts (Ctrl+S etc.) from firing while playing
       if (e.ctrlKey) e.preventDefault();
     };
     const onKeyUp = (e) => {
@@ -113,6 +186,12 @@ const Game = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup',   onKeyUp);
+ 
+    // Mobile sit button fires this
+    window.__catSitToggle = () => {
+      sitTogglePending = true;
+      console.log('[INPUT] Mobile sit button pressed');
+    };
  
     // ── PixiJS app ────────────────────────────────────────────────
     const app = new PIXI.Application({
@@ -333,10 +412,11 @@ const Game = () => {
           const movingRight = keys.has('KeyD') || keys.has('ArrowRight');
           const jumpPressed = keys.has('Space') || keys.has('KeyW') || keys.has('ArrowUp');
  
-          // ── Ctrl: toggle sit ──────────────────────────────────
-          // Only toggle when on the ground — no sitting mid-air.
-          if (ctrlConsumed && isOnGround && !drag.active) {
-            ctrlConsumed = false; // consume so it only fires once per press
+          // ── Ctrl / mobile sit button: toggle sit ─────────────
+          const sitTriggered = (ctrlConsumed || sitTogglePending) && isOnGround && !drag.active;
+          if (sitTriggered) {
+            ctrlConsumed     = false;
+            sitTogglePending = false;
             isSitting    = !isSitting;
             if (isSitting) {
               setAnim(CONFIG.ANIM.SIT, true);
@@ -362,7 +442,6 @@ const Game = () => {
           // ── Moving restriction ────────────────────────────────
           // When the cat is walking on the ground, the only other
           // allowed action is jump. No sitting, no dragging.
-        //   const isWalking = isOnGround && (movingLeft || movingRight);
  
           // ── Drag mode ─────────────────────────────────────────
           if (!drag.active) {
@@ -458,6 +537,19 @@ const Game = () => {
           // Lock root bone Y — prevents walk animation from
           // physically moving the character upward each frame
           rootBone.y = 0;
+ 
+          // ── Shake visual ──────────────────────────────────────
+          // shakeIntensity is set to 1 on shake detection and decays
+          // here each frame. We apply it as a random offset to the
+          // container position — the cat rattles around then settles.
+          if (shakeIntensity > 0.01) {
+            const s = shakeIntensity * 12; // max pixel offset
+            container.x += (Math.random() - 0.5) * s;
+            container.y += (Math.random() - 0.5) * s;
+            shakeIntensity *= 0.88; // decay — tweak for longer/shorter shake
+          } else {
+            shakeIntensity = 0;
+          }
         });
  
         // Store groundY on container for use inside ticker
@@ -469,8 +561,10 @@ const Game = () => {
     return () => {
       console.log('[CLEANUP] Destroying Pixi app and removing listeners');
       purr.pause();
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup',   onKeyUp);
+      window.removeEventListener('keydown',      onKeyDown);
+      window.removeEventListener('keyup',        onKeyUp);
+      window.removeEventListener('devicemotion', onDeviceMotion);
+      window.removeEventListener('pointerdown',  requestOnInteraction);
       if (appRef.current) {
         appRef.current.destroy(true, { children: true, texture: true });
         appRef.current = null;
@@ -479,26 +573,82 @@ const Game = () => {
     };
   }, []);
  
+  // Detect mobile once so we don't recalculate every render
+  const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)
+    || window.matchMedia('(pointer: coarse)').matches;
+ 
   return (
     <div style={styles.wrapper}>
       <h1 style={styles.title}>Cat Game</h1>
+ 
       <div style={styles.canvasWrapper}>
         <canvas ref={canvasRef} />
       </div>
-      <div style={styles.hud}>
-        {[
-          { key: 'A / D',  hint: 'move'      },
-          { key: 'W',      hint: 'jump'       },
-          { key: 'Ctrl',   hint: 'sit / stand'},
-          { key: '🖱 drag', hint: 'throw'     },
-          { key: '🖱 sit',  hint: 'pet + purr'},
-        ].map(({ key, hint }) => (
-          <div key={key} style={styles.keyGroup}>
-            <span style={styles.key}>{key}</span>
-            <span style={styles.hint}>{hint}</span>
+ 
+      {/* ── Desktop HUD ── */}
+      {!isMobile && (
+        <div style={styles.hud}>
+          {[
+            { key: 'A / D',   hint: 'move'       },
+            { key: 'W',       hint: 'jump'        },
+            { key: 'Ctrl',    hint: 'sit / stand' },
+            { key: '🖱 drag',  hint: 'throw'      },
+            { key: '🖱 sit',   hint: 'pet + purr' },
+          ].map(({ key, hint }) => (
+            <div key={key} style={styles.keyGroup}>
+              <span style={styles.key}>{key}</span>
+              <span style={styles.hint}>{hint}</span>
+            </div>
+          ))}
+        </div>
+      )}
+ 
+      {/* ── Mobile controls ── */}
+      {/* 
+        Layout:
+          [←]  [→]       [↑]
+                       [sit]
+        
+        Left/right use touchstart+touchend to simulate key hold.
+        Jump and sit are single taps.
+        All buttons use onPointerDown/Up to work on both touch and mouse.
+      */}
+      {isMobile && (
+        <div style={styles.mobileControls}>
+ 
+          {/* D-pad left side */}
+          <div style={styles.dpad}>
+            <button
+              style={styles.mBtn}
+              onPointerDown={() => window.__catVirtualKeys?.pressKey('ArrowLeft')}
+              onPointerUp={()   => window.__catVirtualKeys?.releaseKey('ArrowLeft')}
+              onPointerLeave={() => window.__catVirtualKeys?.releaseKey('ArrowLeft')}
+            >◀</button>
+ 
+            <button
+              style={styles.mBtn}
+              onPointerDown={() => window.__catVirtualKeys?.pressKey('ArrowRight')}
+              onPointerUp={()   => window.__catVirtualKeys?.releaseKey('ArrowRight')}
+              onPointerLeave={() => window.__catVirtualKeys?.releaseKey('ArrowRight')}
+            >▶</button>
           </div>
-        ))}
-      </div>
+ 
+          {/* Action buttons right side */}
+          <div style={styles.actions}>
+            <button
+              style={{ ...styles.mBtn, ...styles.mBtnJump }}
+              onPointerDown={() => window.__catVirtualKeys?.pressKey('ArrowUp')}
+              onPointerUp={()   => window.__catVirtualKeys?.releaseKey('ArrowUp')}
+            >↑</button>
+ 
+            <button
+              style={{ ...styles.mBtn, ...styles.mBtnSit }}
+              onPointerDown={() => window.__catSitToggle?.()}
+            >🐱</button>
+          </div>
+ 
+        </div>
+      )}
     </div>
   );
 };
@@ -554,6 +704,50 @@ const styles = {
   hint: {
     color:    'rgba(200,200,255,0.4)',
     fontSize: '0.8rem',
+  },
+  mobileControls: {
+    display:        'flex',
+    justifyContent: 'space-between',
+    alignItems:     'flex-end',
+    width:          '100%',
+    maxWidth:       '800px',
+    padding:        '0 16px 12px',
+    boxSizing:      'border-box',
+  },
+  dpad: {
+    display: 'flex',
+    gap:     '8px',
+  },
+  actions: {
+    display:       'flex',
+    flexDirection: 'column',
+    gap:           '8px',
+    alignItems:    'flex-end',
+  },
+  mBtn: {
+    width:            '64px',
+    height:           '64px',
+    borderRadius:     '50%',
+    background:       'rgba(255,255,255,0.1)',
+    border:           '2px solid rgba(255,255,255,0.25)',
+    color:            '#e0e0ff',
+    fontSize:         '1.4rem',
+    cursor:           'pointer',
+    display:          'flex',
+    alignItems:       'center',
+    justifyContent:   'center',
+    userSelect:       'none',
+    WebkitUserSelect: 'none',
+    touchAction:      'none',
+  },
+  mBtnJump: {
+    background: 'rgba(100,160,255,0.2)',
+    border:     '2px solid rgba(100,160,255,0.4)',
+  },
+  mBtnSit: {
+    background: 'rgba(255,160,200,0.2)',
+    border:     '2px solid rgba(255,160,200,0.4)',
+    fontSize:   '1.6rem',
   },
 };
  
