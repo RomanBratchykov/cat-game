@@ -61,7 +61,7 @@ const CONFIG = {
 // ─────────────────────────────────────────────────────────────────
 const spawnHeart = (app, x, y) => {
   const g = new PIXI.Graphics();
-  g.beginFill(0xFFB5B5);
+  g.beginFill(0xff6b9d);
   g.moveTo(0, -8);
   g.bezierCurveTo( 8, -16,  18, -6, 0,  8);
   g.bezierCurveTo(-18, -6, -8, -16, 0, -8);
@@ -101,10 +101,19 @@ const Game = () => {
  
     // ── Purr audio ────────────────────────────────────────────────
     // Created outside the loader so it's ready as soon as user interacts.
-    const purr = new Audio('/assets/purr.mp3');
-    purr.loop   = true;
-    purr.volume = CONFIG.PURR_VOLUME;
- 
+  const purr = new Audio('/assets/purr.mp3');
+  purr.loop   = true;
+  purr.volume = CONFIG.PURR_VOLUME;
+  const bgMusic = new Audio('/assets/bg.mp3');
+  bgMusic.loop   = true;
+  bgMusic.volume = 0.1;
+  const startMusic = () => {
+    bgMusic.play().catch(() => {});
+    window.removeEventListener('keydown', startMusic);
+    window.removeEventListener('pointerdown', startMusic);
+  };
+  window.addEventListener('keydown', startMusic);
+  window.addEventListener('pointerdown', startMusic); 
     // ── Input ─────────────────────────────────────────────────────
     // virtualKeys is shared between keyboard and on-screen buttons.
     // Buttons call pressKey/releaseKey exactly like keyboard events,
@@ -120,17 +129,6 @@ const Game = () => {
  
     let ctrlConsumed = false;
     let sitTogglePending = false; // used by mobile sit button
-     const bgMusic = new Audio('/assets/bg.mp3');
-    bgMusic.loop   = true;
-    bgMusic.volume = 0.01;
-   const startMusic = () => {
-  bgMusic.play().catch(() => {});
-  window.removeEventListener('keydown', startMusic);
-  window.removeEventListener('pointerdown', startMusic);
-};
-
-window.addEventListener('keydown',    startMusic);
-window.addEventListener('pointerdown', startMusic);
  
     // ── Accelerometer / shake ─────────────────────────────────────
     // DeviceMotionEvent gives acceleration in m/s² on each axis.
@@ -296,6 +294,82 @@ window.addEventListener('pointerdown', startMusic);
         // ── Sit state ─────────────────────────────────────────────
         let isSitting      = false;
  
+        // ── Ball ──────────────────────────────────────────────────
+        // Simple circle with velocity + bounce physics.
+        // Cat collision is a circle-circle check against container position.
+        // The ball can be dragged with mouse too.
+        const BALL = {
+          radius:    18,
+          color:     0xff6b9d,
+          x:         CONFIG.WIDTH * 0.7,
+          y:         CONFIG.FLOOR_Y - 18,
+          vx:        -2,
+          vy:        0,
+          bounce:    0.65,   // energy kept after bounce (0=dead, 1=infinite)
+          friction:  0.988,  // horizontal slowdown per frame
+          gravity:   0.55,
+          dragging:  false,
+          dragOffX:  0,
+          dragOffY:  0,
+        };
+ 
+        // Draw ball — we redraw each frame by clearing and refilling
+        const ballGfx = new PIXI.Graphics();
+        app.stage.addChild(ballGfx);
+ 
+        // Ball shadow — subtle ellipse under the ball
+        const ballShadow = new PIXI.Graphics();
+        app.stage.addChild(ballShadow);
+        app.stage.setChildIndex(ballShadow, 2); // behind ball
+ 
+        const drawBall = () => {
+          // Shadow
+          ballShadow.clear();
+          const shadowScale = Math.max(0.2, 1 - (CONFIG.FLOOR_Y - BALL.y) / 300);
+          ballShadow.beginFill(0x000000, 0.2 * shadowScale);
+          ballShadow.drawEllipse(BALL.x, CONFIG.FLOOR_Y + 4, BALL.radius * shadowScale, BALL.radius * 0.3 * shadowScale);
+          ballShadow.endFill();
+ 
+          // Ball body
+          ballGfx.clear();
+          // Outer circle
+          ballGfx.beginFill(BALL.color);
+          ballGfx.drawCircle(BALL.x, BALL.y, BALL.radius);
+          ballGfx.endFill();
+          // Shine highlight — small white circle offset up-left
+          ballGfx.beginFill(0xffffff, 0.4);
+          ballGfx.drawCircle(BALL.x - BALL.radius * 0.3, BALL.y - BALL.radius * 0.3, BALL.radius * 0.25);
+          ballGfx.endFill();
+        };
+        drawBall();
+ 
+        // Make ball interactive for dragging
+        ballGfx.interactive = true;
+        ballGfx.cursor      = 'grab';
+        ballGfx.hitArea     = new PIXI.Circle(0, 0, BALL.radius * 1.5); // slightly larger for easier grab
+ 
+        let ballDragLastX = 0;
+        let ballDragLastY = 0;
+        let ballDragVelX  = 0;
+        let ballDragVelY  = 0;
+ 
+        ballGfx.on('pointerdown', (e) => {
+          BALL.dragging = true;
+          BALL.dragOffX = BALL.x - e.data.global.x;
+          BALL.dragOffY = BALL.y - e.data.global.y;
+          ballDragLastX = e.data.global.x;
+          ballDragLastY = e.data.global.y;
+          ballDragVelX  = 0;
+          ballDragVelY  = 0;
+          ballGfx.cursor = 'grabbing';
+          console.log('[BALL] Grabbed');
+        });
+ 
+        // Ball drag is handled in the existing stage pointermove below
+        // We add ball logic to it by checking BALL.dragging
+ 
+        console.log('[BALL] Physics ball created at', BALL.x, BALL.y);
+ 
         // ── Petting state ─────────────────────────────────────────
         // petMoveCount accumulates raw pointermove events over the cat.
         // Every PET_MOVE_THRESHOLD moves = one "stroke" = one heart.
@@ -404,28 +478,50 @@ window.addEventListener('pointerdown', startMusic);
         app.stage.interactive = true;
  
         app.stage.on('pointermove', (e) => {
-          if (!drag.active) return;
-          drag.velX   = e.data.global.x - drag.lastX;
-          drag.velY   = e.data.global.y - drag.lastY;
-          drag.lastX  = e.data.global.x;
-          drag.lastY  = e.data.global.y;
-          container.x = e.data.global.x + drag.offsetX;
-          container.y = e.data.global.y + drag.offsetY;
+          // Cat drag
+          if (drag.active) {
+            drag.velX   = e.data.global.x - drag.lastX;
+            drag.velY   = e.data.global.y - drag.lastY;
+            drag.lastX  = e.data.global.x;
+            drag.lastY  = e.data.global.y;
+            container.x = e.data.global.x + drag.offsetX;
+            container.y = e.data.global.y + drag.offsetY;
+          }
+          // Ball drag
+          if (BALL.dragging) {
+            ballDragVelX  = e.data.global.x - ballDragLastX;
+            ballDragVelY  = e.data.global.y - ballDragLastY;
+            ballDragLastX = e.data.global.x;
+            ballDragLastY = e.data.global.y;
+            BALL.x = e.data.global.x + BALL.dragOffX;
+            BALL.y = e.data.global.y + BALL.dragOffY;
+            BALL.vx = 0;
+            BALL.vy = 0;
+          }
         });
  
         app.stage.on('pointerup', () => {
-          if (!drag.active) return;
-          drag.active      = false;
-          character.cursor = 'grab';
-          character.pivot.set(0, 0);
-          tilt.angle         = 0;
-          tilt.vel           = 0;
-          container.rotation = 0;
-          // Throw the cat with mouse velocity
-          velocityX = drag.velX * 0.5;
-          velocityY = drag.velY * 0.5;
-          isOnGround = false;
-          console.log(`[DRAG] Released — throw velocity: vx=${velocityX.toFixed(1)}, vy=${velocityY.toFixed(1)}`);
+          // Cat release
+          if (drag.active) {
+            drag.active      = false;
+            character.cursor = 'grab';
+            character.pivot.set(0, 0);
+            tilt.angle         = 0;
+            tilt.vel           = 0;
+            container.rotation = 0;
+            velocityX = drag.velX * 0.5;
+            velocityY = drag.velY * 0.5;
+            isOnGround = false;
+            console.log(`[DRAG] Released — throw velocity: vx=${velocityX.toFixed(1)}, vy=${velocityY.toFixed(1)}`);
+          }
+          // Ball release — throw with drag velocity
+          if (BALL.dragging) {
+            BALL.dragging  = false;
+            BALL.vx        = ballDragVelX * 0.8;
+            BALL.vy        = ballDragVelY * 0.8;
+            ballGfx.cursor = 'grab';
+            console.log(`[BALL] Thrown — vx=${BALL.vx.toFixed(1)}, vy=${BALL.vy.toFixed(1)}`);
+          }
         });
  
         // ── Root bone lock ────────────────────────────────────────
@@ -562,6 +658,68 @@ window.addEventListener('pointerdown', startMusic);
             setAnim(CONFIG.ANIM.STAND);
           }
  
+          // ── Ball physics ──────────────────────────────────────
+          if (!BALL.dragging) {
+            // Gravity
+            BALL.vy += BALL.gravity;
+ 
+            // Move
+            BALL.x += BALL.vx;
+            BALL.y += BALL.vy;
+ 
+            // Horizontal friction (only when on floor)
+            if (BALL.y >= CONFIG.FLOOR_Y - BALL.radius) {
+              BALL.vx *= BALL.friction;
+            }
+ 
+            // Floor bounce
+            if (BALL.y >= CONFIG.FLOOR_Y - BALL.radius) {
+              BALL.y  = CONFIG.FLOOR_Y - BALL.radius;
+              BALL.vy = -Math.abs(BALL.vy) * BALL.bounce;
+              // Stop tiny bounces — looks better than infinite micro-hops
+              if (Math.abs(BALL.vy) < 1) BALL.vy = 0;
+            }
+ 
+            // Wall bounces
+            if (BALL.x - BALL.radius <= 0) {
+              BALL.x  = BALL.radius;
+              BALL.vx = Math.abs(BALL.vx) * BALL.bounce;
+              console.log('[BALL] Wall bounce left');
+            }
+            if (BALL.x + BALL.radius >= CONFIG.WIDTH) {
+              BALL.x  = CONFIG.WIDTH - BALL.radius;
+              BALL.vx = -Math.abs(BALL.vx) * BALL.bounce;
+              console.log('[BALL] Wall bounce right');
+            }
+ 
+            // ── Cat ↔ Ball collision ──────────────────────────────
+            // Simple circle vs circle — cat treated as circle at container pos.
+            // CAT_RADIUS approximates the cat's body size in world pixels.
+            const CAT_RADIUS = 45;
+            const dx   = BALL.x - container.x;
+            const dy   = BALL.y - (container.y - 80); // offset up to cat body center
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const minDist = BALL.radius + CAT_RADIUS;
+ 
+            if (dist < minDist && dist > 0) {
+              // Push ball away from cat
+              const nx     = dx / dist;
+              const ny     = dy / dist;
+              const speed  = Math.sqrt(BALL.vx * BALL.vx + BALL.vy * BALL.vy);
+              const bounce = Math.max(speed, 4); // minimum kick speed
+              BALL.vx = nx * bounce * 0.9;
+              BALL.vy = ny * bounce * 0.9 - 2; // slight upward bias looks fun
+              // Separate so they don't overlap
+              BALL.x = container.x + nx * (minDist + 1);
+              BALL.y = (container.y - 80) + ny * (minDist + 1);
+              console.log('[BALL] Cat hit! kicked ball');
+            }
+          }
+ 
+          // Update hitArea position to follow ball
+          ballGfx.hitArea = new PIXI.Circle(BALL.x, BALL.y, BALL.radius * 1.5);
+          drawBall();
+ 
           // Lock root bone Y — prevents walk animation from
           // physically moving the character upward each frame
           rootBone.y = 0;
@@ -601,82 +759,64 @@ window.addEventListener('pointerdown', startMusic);
     };
   }, []);
  
-  // Detect mobile once so we don't recalculate every render
-  const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)
-    || window.matchMedia('(pointer: coarse)').matches;
- 
   return (
     <div style={styles.wrapper}>
       <h1 style={styles.title}>Cat Game</h1>
  
       <div style={styles.canvasWrapper}>
-        <canvas ref={canvasRef} />
+        <canvas ref={canvasRef} style={{ display: 'block', width: '100%' }} />
       </div>
  
-      {/* ── Desktop HUD ── */}
-      {!isMobile && (
-        <div style={styles.hud}>
-          {[
-            { key: 'A / D',   hint: 'move'       },
-            { key: 'W',       hint: 'jump'        },
-            { key: 'Ctrl',    hint: 'sit / stand' },
-            { key: '🖱 drag',  hint: 'throw'      },
-            { key: '🖱 sit',   hint: 'pet + purr' },
-          ].map(({ key, hint }) => (
-            <div key={key} style={styles.keyGroup}>
-              <span style={styles.key}>{key}</span>
-              <span style={styles.hint}>{hint}</span>
-            </div>
-          ))}
-        </div>
-      )}
- 
-      {/* ── Mobile controls ── */}
-      {/* 
-        Layout:
-          [←]  [→]       [↑]
-                       [sit]
-        
-        Left/right use touchstart+touchend to simulate key hold.
-        Jump and sit are single taps.
-        All buttons use onPointerDown/Up to work on both touch and mouse.
-      */}
-      {isMobile && (
-        <div style={styles.mobileControls}>
- 
-          {/* D-pad left side */}
-          <div style={styles.dpad}>
-            <button
-              style={styles.mBtn}
-              onPointerDown={() => window.__catVirtualKeys?.pressKey('ArrowLeft')}
-              onPointerUp={()   => window.__catVirtualKeys?.releaseKey('ArrowLeft')}
-              onPointerLeave={() => window.__catVirtualKeys?.releaseKey('ArrowLeft')}
-            >◀</button>
- 
-            <button
-              style={styles.mBtn}
-              onPointerDown={() => window.__catVirtualKeys?.pressKey('ArrowRight')}
-              onPointerUp={()   => window.__catVirtualKeys?.releaseKey('ArrowRight')}
-              onPointerLeave={() => window.__catVirtualKeys?.releaseKey('ArrowRight')}
-            >▶</button>
+      {/* Desktop HUD — hidden on mobile via CSS in index.html */}
+      <div className="desktop-hud" style={styles.hud}>
+        {[
+          { key: 'A / D',  hint: 'move'       },
+          { key: 'W',      hint: 'jump'        },
+          { key: 'Ctrl',   hint: 'sit / stand' },
+          { key: '🖱 drag', hint: 'throw'      },
+          { key: '🖱 sit',  hint: 'pet + purr' },
+        ].map(({ key, hint }) => (
+          <div key={key} style={styles.keyGroup}>
+            <span style={styles.key}>{key}</span>
+            <span style={styles.hint}>{hint}</span>
           </div>
+        ))}
+      </div>
  
-          {/* Action buttons right side */}
-          <div style={styles.actions}>
-            <button
-              style={{ ...styles.mBtn, ...styles.mBtnJump }}
-              onPointerDown={() => window.__catVirtualKeys?.pressKey('ArrowUp')}
-              onPointerUp={()   => window.__catVirtualKeys?.releaseKey('ArrowUp')}
-            >↑</button>
+      {/* Mobile controls — hidden on desktop via CSS in index.html */}
+      <div className="mobile-controls" style={styles.mobileControls}>
  
-            <button
-              style={{ ...styles.mBtn, ...styles.mBtnSit }}
-              onPointerDown={() => window.__catSitToggle?.()}
-            >🐱</button>
-          </div>
+        <div style={styles.dpad}>
+          <button
+            style={styles.mBtn}
+            onPointerDown={() => window.__catVirtualKeys?.pressKey('ArrowLeft')}
+            onPointerUp={()   => window.__catVirtualKeys?.releaseKey('ArrowLeft')}
+            onPointerLeave={() => window.__catVirtualKeys?.releaseKey('ArrowLeft')}
+          >◀</button>
  
+          <button
+            style={styles.mBtn}
+            onPointerDown={() => window.__catVirtualKeys?.pressKey('ArrowRight')}
+            onPointerUp={()   => window.__catVirtualKeys?.releaseKey('ArrowRight')}
+            onPointerLeave={() => window.__catVirtualKeys?.releaseKey('ArrowRight')}
+          >▶</button>
         </div>
-      )}
+ 
+        <div style={styles.actions}>
+          <button
+            style={{ ...styles.mBtn, ...styles.mBtnJump }}
+            onPointerDown={() => window.__catVirtualKeys?.pressKey('ArrowUp')}
+            onPointerUp={()   => window.__catVirtualKeys?.releaseKey('ArrowUp')}
+            onPointerLeave={() => window.__catVirtualKeys?.releaseKey('ArrowUp')}
+          >↑</button>
+ 
+          <button
+            style={{ ...styles.mBtn, ...styles.mBtnSit }}
+            onPointerDown={() => window.__catSitToggle?.()}
+          >🐱</button>
+        </div>
+ 
+      </div>
     </div>
   );
 };
