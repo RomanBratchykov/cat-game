@@ -1,0 +1,916 @@
+// import React, { useEffect, useRef } from 'react';
+// import * as PIXI from 'pixi.js';
+// import { Spine } from 'pixi-spine';
+ 
+
+// const meows = [
+//   new Audio('/assets/meow1.mp3'),
+//   new Audio('/assets/meow2.mp3'),
+//   new Audio('/assets/meow3.mp3'),
+//   new Audio('/assets/meow4.mp3'),
+//   new Audio('/assets/meow5.mp3'),
+//   new Audio('/assets/meow6.mp3'),
+//   new Audio('/assets/meow7.mp3'),
+// ];
+
+// const playMeow = () => {
+//   const sound = meows[Math.floor(Math.random() * meows.length)];
+//   sound.currentTime = 0; // rewind if already playing
+//   sound.volume = 0.7;
+//   sound.play().catch(() => {}); 
+// };
+// const CONFIG = {
+//   WIDTH:  800,
+//   HEIGHT: 600,
+//   BG_COLOR: 0x1a1a2e,
+ 
+//   MOVE_SPEED: 3,
+ 
+//   JUMP_FORCE_VERTICAL: 14,   
+//   JUMP_FORCE_FORWARD:  10,   
+//   JUMP_HORIZONTAL:      4,   
+ 
+//   GRAVITY: 0.5,
+//   FLOOR_Y: 540,
+ 
+//   ANIM: {
+//     STAND:         'stand',
+//     WALK:          'walk',
+//     JUMP_VERTICAL: 'jump_vertical',
+//     JUMP_FORWARD:  'jump_vertical', // replace with 'jump_forward' if you make one
+//     SIT:           'sit',
+//     PET:           'sitpet',           // replace with 'pet' if you make a separate one
+//   },
+ 
+//   // ── Petting ───────────────────────────────────────────────────
+//   PET_MOVE_THRESHOLD: 4,   // mouse moves over cat needed to count as one "stroke"
+//   HEART_INTERVAL:     8,   // ticker frames between hearts spawning
+//   PURR_VOLUME:        0.4,
+// };
+ 
+// // ─────────────────────────────────────────────────────────────────
+// // HEART FACTORY
+// // Creates a floating heart that rises and fades — pure PIXI.Graphics,
+// // no external assets needed.
+// // ─────────────────────────────────────────────────────────────────
+// const spawnHeart = (app, x, y) => {
+//   const g = new PIXI.Graphics();
+//   g.beginFill(0xff6b9d);
+//   g.moveTo(0, -8);
+//   g.bezierCurveTo( 8, -16,  18, -6, 0,  8);
+//   g.bezierCurveTo(-18, -6, -8, -16, 0, -8);
+//   g.endFill();
+//   g.x     = x + (Math.random() * 40 - 20); // slight random spread
+//   g.y     = y;
+//   g.alpha = 1;
+//   app.stage.addChild(g);
+ 
+//   let life = 1;
+//   const rise = () => {
+//     g.y     -= 1.5;
+//     g.alpha -= 0.012;
+//     g.scale.set(g.scale.x + 0.008);
+//     life    -= 0.012;
+//     if (life <= 0) {
+//       app.ticker.remove(rise);
+//       app.stage.removeChild(g);
+//     }
+//   };
+//   app.ticker.add(rise);
+// };
+ 
+// // ─────────────────────────────────────────────────────────────────
+// // COMPONENT
+// // ─────────────────────────────────────────────────────────────────
+// const Game = () => {
+//   const canvasRef     = useRef(null);
+//   const appRef        = useRef(null);
+//   const isInitialized = useRef(false);
+ 
+//   useEffect(() => {
+//     if (isInitialized.current) return;
+//     isInitialized.current = true;
+ 
+//     console.log('[INIT] Starting game initialization');
+ 
+//     // ── Purr audio ────────────────────────────────────────────────
+//     // Created outside the loader so it's ready as soon as user interacts.
+//   const purr = new Audio('/assets/purr.mp3');
+//   purr.loop   = true;
+//   purr.volume = CONFIG.PURR_VOLUME;
+//   const bgMusic = new Audio('/assets/bg.mp3');
+//   bgMusic.loop   = true;
+//   bgMusic.volume = 0.1;
+//   const startMusic = () => {
+//     bgMusic.play().catch(() => {});
+//     window.removeEventListener('keydown', startMusic);
+//     window.removeEventListener('pointerdown', startMusic);
+//   };
+//   window.addEventListener('keydown', startMusic);
+//   window.addEventListener('pointerdown', startMusic); 
+//     // ── Input ─────────────────────────────────────────────────────
+//     // virtualKeys is shared between keyboard and on-screen buttons.
+//     // Buttons call pressKey/releaseKey exactly like keyboard events,
+//     // so the game ticker doesn't need to know the input source.
+//     const keys = new Set();
+ 
+//     const pressKey   = (code) => keys.add(code);
+//     const releaseKey = (code) => keys.delete(code);
+ 
+//     // Expose to React buttons via refs
+//     const virtualKeys = { pressKey, releaseKey };
+//     window.__catVirtualKeys = virtualKeys; // used by JSX buttons below
+ 
+//     let ctrlConsumed = false;
+//     let sitTogglePending = false; // used by mobile sit button
+ 
+//     // ── Accelerometer / shake ─────────────────────────────────────
+//     // DeviceMotionEvent gives acceleration in m/s² on each axis.
+//     // A shake is detected when the total acceleration spike exceeds
+//     // SHAKE_THRESHOLD. We track lastAcc to compute delta — a sudden
+//     // change (not just high acceleration) means shake.
+//     // shakeCooldown prevents multiple triggers from one shake gesture.
+//     const SHAKE_THRESHOLD = 18;  // m/s² delta — tweak if too sensitive
+//     const SHAKE_COOLDOWN  = 500; // ms between shake reactions
+ 
+//     let lastAcc       = { x: 0, y: 0, z: 0 };
+//     let lastShakeTime = 0;
+//     let shakeIntensity = 0; // 0–1, decays each frame, drives visual shake
+ 
+//     // iOS 13+ requires permission for DeviceMotionEvent
+//     const requestMotionPermission = async () => {
+//       if (typeof DeviceMotionEvent === 'undefined') {
+//         console.log('[ACCEL] DeviceMotionEvent not supported');
+//         return;
+//       }
+//       if (typeof DeviceMotionEvent.requestPermission === 'function') {
+//         // iOS 13+
+//         try {
+//           const permission = await DeviceMotionEvent.requestPermission();
+//           if (permission !== 'granted') {
+//             console.log('[ACCEL] Permission denied');
+//             return;
+//           }
+//           console.log('[ACCEL] iOS permission granted');
+//         } catch (err) {
+//           console.log('[ACCEL] Permission request failed:', err);
+//           return;
+//         }
+//       }
+//       window.addEventListener('devicemotion', onDeviceMotion);
+//       console.log('[ACCEL] Listening for device motion');
+//     };
+ 
+//     const onDeviceMotion = (e) => {
+//       const acc = e.accelerationIncludingGravity;
+//       if (!acc) return;
+ 
+//       const dx    = (acc.x || 0) - lastAcc.x;
+//       const dy    = (acc.y || 0) - lastAcc.y;
+//       const dz    = (acc.z || 0) - lastAcc.z;
+//       const delta = Math.sqrt(dx * dx + dy * dy + dz * dz);
+ 
+//       lastAcc = { x: acc.x || 0, y: acc.y || 0, z: acc.z || 0 };
+ 
+//       const now = Date.now();
+//       if (delta > SHAKE_THRESHOLD && now - lastShakeTime > SHAKE_COOLDOWN) {
+//         lastShakeTime  = now;
+//         shakeIntensity = 1; // will decay in ticker
+//         console.log(`[ACCEL] Shake detected! delta=${delta.toFixed(1)}`);
+//       }
+//     };
+ 
+//     // Request permission on first user interaction (required by iOS)
+//     // We attach it to the canvas click/touch since the user will
+//     // tap there first anyway.
+//     const requestOnInteraction = () => {
+//       requestMotionPermission();
+//       window.removeEventListener('pointerdown', requestOnInteraction);
+//     };
+//     window.addEventListener('pointerdown', requestOnInteraction);
+ 
+//     const onKeyDown = (e) => {
+//       keys.add(e.code);
+//       if ((e.code === 'ControlLeft' || e.code === 'ControlRight') && !ctrlConsumed) {
+//         ctrlConsumed = true;
+//         console.log('[INPUT] Ctrl pressed — will toggle sit on next tick');
+//       }
+//       if (e.ctrlKey) e.preventDefault();
+//     };
+//     const onKeyUp = (e) => {
+//       keys.delete(e.code);
+//       if (e.code === 'ControlLeft' || e.code === 'ControlRight') {
+//         ctrlConsumed = false;
+//       }
+//     };
+//     window.addEventListener('keydown', onKeyDown);
+//     window.addEventListener('keyup',   onKeyUp);
+ 
+//     // Mobile sit button fires this
+//     window.__catSitToggle = () => {
+//       sitTogglePending = true;
+//       console.log('[INPUT] Mobile sit button pressed');
+//     };
+ 
+//     // ── PixiJS app ────────────────────────────────────────────────
+//     const app = new PIXI.Application({
+//       width:           CONFIG.WIDTH,
+//       height:          CONFIG.HEIGHT,
+//       backgroundColor: CONFIG.BG_COLOR,
+//       view:            canvasRef.current,
+//       antialias:       true,
+//     });
+//     appRef.current = app;
+//     console.log('[PIXI] Application created, WebGL renderer ready');
+ 
+//     // Background
+//     const bg = new PIXI.Graphics();
+//     bg.beginFill(CONFIG.BG_COLOR);
+//     bg.drawRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+//     bg.endFill();
+//     app.stage.addChild(bg);
+ 
+//     // Floor
+//     const floor = new PIXI.Graphics();
+//     floor.beginFill(0x16213e);
+//     floor.drawRect(0, CONFIG.FLOOR_Y, CONFIG.WIDTH, CONFIG.HEIGHT - CONFIG.FLOOR_Y);
+//     floor.endFill();
+//     app.stage.addChild(floor);
+ 
+//     // ── Load Spine ────────────────────────────────────────────────
+//     app.loader
+//       .add('skeleton', '/assets/skeleton.json')
+//       .load((loader, resources) => {
+//         console.log('[SPINE] Assets loaded, creating skeleton');
+ 
+//         const character = new Spine(resources.skeleton.spineData);
+//         character.scale.set(0.5);
+//         character.interactive          = true;
+//         character.interactiveChildren  = false;
+//         character.cursor               = 'grab';
+ 
+//         // hitArea must be set manually — Spine meshes have no automatic bounds.
+//         // Rectangle is in local (pre-scale) coordinates.
+//         character.hitArea = new PIXI.Rectangle(-150, -300, 300, 350);
+//         console.log('[SPINE] hitArea set manually (Spine has no auto bounds)');
+ 
+//         // Wrap character in a container so we can apply rotation/tilt
+//         // to the whole cat without touching the Spine object's own transform.
+//         const container = new PIXI.Container();
+//         container.addChild(character);
+//         app.stage.addChild(container);
+ 
+//         // ── Ground alignment ──────────────────────────────────────
+//         // Spine's root bone offset shifts the visual differently from
+//         // what you'd expect. We read bounds from setup pose (no animation)
+//         // to get the true resting bottom edge, then pin that to FLOOR_Y.
+//         character.skeleton.setToSetupPose();
+//         character.skeleton.updateWorldTransform();
+//         const bounds      = character.getLocalBounds();
+//         const floorOffset = bounds.y + bounds.height;
+//         container.x       = CONFIG.WIDTH / 2;
+//         container.y       = CONFIG.FLOOR_Y - floorOffset * Math.abs(character.scale.y);
+//         character.x       = 0;
+//         character.y       = 0;
+//         console.log(`[SPINE] Ground aligned: container.y = ${container.y.toFixed(1)}, floorOffset = ${floorOffset.toFixed(1)}`);
+ 
+//         // Start idle animation
+//         character.state.setAnimation(0, CONFIG.ANIM.STAND, true);
+//         console.log(`[ANIM] Track 0 started: ${CONFIG.ANIM.STAND}`);
+ 
+//         // ── State variables ───────────────────────────────────────
+//         let currentAnim    = CONFIG.ANIM.STAND;
+//         let velocityY      = 0;
+//         let velocityX      = 0;
+//         let isOnGround     = true;
+//         let facingRight    = true;
+ 
+//         // ── Sit state ─────────────────────────────────────────────
+//         let isSitting      = false;
+ 
+//         // ── Ball ──────────────────────────────────────────────────
+//         // Simple circle with velocity + bounce physics.
+//         // Cat collision is a circle-circle check against container position.
+//         // The ball can be dragged with mouse too.
+//         const BALL = {
+//           radius:    18,
+//           color:     0xff6b9d,
+//           x:         CONFIG.WIDTH * 0.7,
+//           y:         CONFIG.FLOOR_Y - 18,
+//           vx:        -2,
+//           vy:        0,
+//           bounce:    0.65,   // energy kept after bounce (0=dead, 1=infinite)
+//           friction:  0.988,  // horizontal slowdown per frame
+//           gravity:   0.55,
+//           dragging:  false,
+//           dragOffX:  0,
+//           dragOffY:  0,
+//         };
+ 
+//         // Draw ball — we redraw each frame by clearing and refilling
+//         const ballGfx = new PIXI.Graphics();
+//         app.stage.addChild(ballGfx);
+ 
+//         // Ball shadow — subtle ellipse under the ball
+//         const ballShadow = new PIXI.Graphics();
+//         app.stage.addChild(ballShadow);
+//         app.stage.setChildIndex(ballShadow, 2); // behind ball
+ 
+//         const drawBall = () => {
+//           // Shadow
+//           ballShadow.clear();
+//           const shadowScale = Math.max(0.2, 1 - (CONFIG.FLOOR_Y - BALL.y) / 300);
+//           ballShadow.beginFill(0x000000, 0.2 * shadowScale);
+//           ballShadow.drawEllipse(BALL.x, CONFIG.FLOOR_Y + 4, BALL.radius * shadowScale, BALL.radius * 0.3 * shadowScale);
+//           ballShadow.endFill();
+ 
+//           // Ball body
+//           ballGfx.clear();
+//           // Outer circle
+//           ballGfx.beginFill(BALL.color);
+//           ballGfx.drawCircle(BALL.x, BALL.y, BALL.radius);
+//           ballGfx.endFill();
+//           // Shine highlight — small white circle offset up-left
+//           ballGfx.beginFill(0xffffff, 0.4);
+//           ballGfx.drawCircle(BALL.x - BALL.radius * 0.3, BALL.y - BALL.radius * 0.3, BALL.radius * 0.25);
+//           ballGfx.endFill();
+//         };
+//         drawBall();
+ 
+//         // Make ball interactive for dragging
+//         ballGfx.interactive = true;
+//         ballGfx.cursor      = 'grab';
+//         ballGfx.hitArea     = new PIXI.Circle(0, 0, BALL.radius * 1.5); // slightly larger for easier grab
+ 
+//         let ballDragLastX = 0;
+//         let ballDragLastY = 0;
+//         let ballDragVelX  = 0;
+//         let ballDragVelY  = 0;
+ 
+//         ballGfx.on('pointerdown', (e) => {
+//           BALL.dragging = true;
+//           BALL.dragOffX = BALL.x - e.data.global.x;
+//           BALL.dragOffY = BALL.y - e.data.global.y;
+//           ballDragLastX = e.data.global.x;
+//           ballDragLastY = e.data.global.y;
+//           ballDragVelX  = 0;
+//           ballDragVelY  = 0;
+//           ballGfx.cursor = 'grabbing';
+//           console.log('[BALL] Grabbed');
+//         });
+ 
+//         // Ball drag is handled in the existing stage pointermove below
+//         // We add ball logic to it by checking BALL.dragging
+ 
+//         console.log('[BALL] Physics ball created at', BALL.x, BALL.y);
+ 
+//         // ── Petting state ─────────────────────────────────────────
+//         // petMoveCount accumulates raw pointermove events over the cat.
+//         // Every PET_MOVE_THRESHOLD moves = one "stroke" = one heart.
+//         // This prevents a heart spawning on every single pixel of mouse movement.
+//         let petMoveCount   = 0;
+//         let isPurring      = false;
+//         let heartTickCount = 0;
+ 
+//         // ── Tilt physics (used during drag) ───────────────────────
+//         // We apply rotation to the container, not the character,
+//         // so it doesn't interfere with Spine's bone transforms.
+//         const tilt = { angle: 0, vel: 0, stiff: 0.15, damping: 0.75 };
+ 
+//         // ── Drag state ────────────────────────────────────────────
+//         const drag = {
+//           active:  false,
+//           offsetX: 0,
+//           offsetY: 0,
+//           velX:    0,
+//           velY:    0,
+//           lastX:   0,
+//           lastY:   0,
+//         };
+ 
+//         // ── Anim helpers ──────────────────────────────────────────
+//         // Guard prevents restarting the same animation every frame,
+//         // which would reset it to frame 0 constantly.
+//         const setAnim = (name, loop = true) => {
+//           if (currentAnim === name) return;
+//           console.log(`[ANIM] Track 0: ${currentAnim} → ${name} (loop: ${loop})`);
+//           character.state.setAnimation(0, name, loop);
+//           currentAnim = name;
+//         };
+ 
+//         // ── Petting helpers ───────────────────────────────────────
+//         const startPurr = () => {
+//           if (isPurring) return;
+//           isPurring = true;
+//           purr.currentTime = 0;
+//           purr.play().catch(() => {});
+//           console.log('[PET] Purring started');
+//         };
+ 
+//         const stopPurr = () => {
+//           if (!isPurring) return;
+//           isPurring = false;
+//           purr.pause();
+//           purr.currentTime = 0;
+//           console.log('[PET] Purring stopped');
+//         };
+ 
+//         // ── Pointer events ────────────────────────────────────────
+ 
+//         // pointerdown: sitting → start pet anim / standing → start drag
+//         character.on('pointerdown', (e) => {
+//           if (isSitting) {
+//             console.log('[INPUT] Clicked sitting cat — entering pet mode');
+//             setAnim(CONFIG.ANIM.PET, true);
+//             startPurr();
+//             return;
+//           }
+//           // Drag
+//           playMeow();
+//           drag.active  = true;
+//           drag.offsetX = container.x - e.data.global.x;
+//           drag.offsetY = container.y - e.data.global.y;
+//           drag.lastX   = e.data.global.x;
+//           drag.lastY   = e.data.global.y;
+//           drag.velX    = 0;
+//           drag.velY    = 0;
+//           isOnGround   = false;
+//           velocityY    = 0;
+//           character.cursor = 'grabbing';
+//           character.pivot.set(0, bounds.y); // pivot at top so cat hangs down
+//           console.log('[DRAG] Started drag, pivot set to top of skeleton');
+//         });
+ 
+//         // pointermove on the cat itself — counts petting strokes
+//         character.on('pointermove', () => {
+//           if (!isSitting) return;
+//           petMoveCount++;
+//           if (petMoveCount >= CONFIG.PET_MOVE_THRESHOLD) {
+//             petMoveCount = 0;
+//             heartTickCount++;
+//             // Throttle hearts so they don't spawn every threshold
+//             if (heartTickCount % CONFIG.HEART_INTERVAL === 0) {
+//               const hx = container.x;
+//               const hy = container.y - 170 * Math.abs(character.scale.y);
+//               spawnHeart(app, hx, hy);
+//               console.log('[PET] Heart spawned');
+//             }
+//             startPurr();
+//           }
+//         });
+ 
+//         // pointerout — stop purring when mouse leaves the cat while sitting
+//         character.on('pointerout', () => {
+//           if (isSitting && isPurring) {
+//             stopPurr();
+//             console.log('[PET] Mouse left cat — purring paused');
+//           }
+//         });
+ 
+//         // Stage-level move and up — needed so drag doesn't break
+//         // if mouse moves faster than the cat sprite
+//         app.stage.interactive = true;
+ 
+//         app.stage.on('pointermove', (e) => {
+//           // Cat drag
+//           if (drag.active) {
+//             drag.velX   = e.data.global.x - drag.lastX;
+//             drag.velY   = e.data.global.y - drag.lastY;
+//             drag.lastX  = e.data.global.x;
+//             drag.lastY  = e.data.global.y;
+//             container.x = e.data.global.x + drag.offsetX;
+//             container.y = e.data.global.y + drag.offsetY;
+//           }
+//           // Ball drag
+//           if (BALL.dragging) {
+//             ballDragVelX  = e.data.global.x - ballDragLastX;
+//             ballDragVelY  = e.data.global.y - ballDragLastY;
+//             ballDragLastX = e.data.global.x;
+//             ballDragLastY = e.data.global.y;
+//             BALL.x = e.data.global.x + BALL.dragOffX;
+//             BALL.y = e.data.global.y + BALL.dragOffY;
+//             BALL.vx = 0;
+//             BALL.vy = 0;
+//           }
+//         });
+ 
+//         app.stage.on('pointerup', () => {
+//           // Cat release
+//           if (drag.active) {
+//             drag.active      = false;
+//             character.cursor = 'grab';
+//             character.pivot.set(0, 0);
+//             tilt.angle         = 0;
+//             tilt.vel           = 0;
+//             container.rotation = 0;
+//             velocityX = drag.velX * 0.5;
+//             velocityY = drag.velY * 0.5;
+//             isOnGround = false;
+//             console.log(`[DRAG] Released — throw velocity: vx=${velocityX.toFixed(1)}, vy=${velocityY.toFixed(1)}`);
+//           }
+//           // Ball release — throw with drag velocity
+//           if (BALL.dragging) {
+//             BALL.dragging  = false;
+//             BALL.vx        = ballDragVelX * 0.8;
+//             BALL.vy        = ballDragVelY * 0.8;
+//             ballGfx.cursor = 'grab';
+//             console.log(`[BALL] Thrown — vx=${BALL.vx.toFixed(1)}, vy=${BALL.vy.toFixed(1)}`);
+//           }
+//         });
+ 
+//         // ── Root bone lock ────────────────────────────────────────
+//         // The walk animation has a root.translate.y = -11.61 which
+//         // physically lifts the whole skeleton every frame.
+//         // We clamp it to 0 after Spine updates to prevent vertical drift.
+//         const rootBone = character.skeleton.getRootBone();
+ 
+//         // ── Main ticker ───────────────────────────────────────────
+//         app.ticker.add(() => {
+//           const movingLeft  = keys.has('KeyA') || keys.has('ArrowLeft');
+//           const movingRight = keys.has('KeyD') || keys.has('ArrowRight');
+//           const jumpPressed = keys.has('Space') || keys.has('KeyW') || keys.has('ArrowUp');
+ 
+//           // ── Ctrl / mobile sit button: toggle sit ─────────────
+//           const sitTriggered = (ctrlConsumed || sitTogglePending) && isOnGround && !drag.active;
+//           if (sitTriggered) {
+//             ctrlConsumed     = false;
+//             sitTogglePending = false;
+//             isSitting    = !isSitting;
+//             if (isSitting) {
+//               setAnim(CONFIG.ANIM.SIT, true);
+//               console.log('[STATE] Cat sat down — movement locked');
+//             } else {
+//               setAnim(CONFIG.ANIM.STAND, true);
+//               stopPurr();
+//               petMoveCount   = 0;
+//               heartTickCount = 0;
+//               console.log('[STATE] Cat stood up — movement unlocked');
+//             }
+//           }
+ 
+//           // ── Sitting mode ──────────────────────────────────────
+//           // When sitting: block all movement, allow only petting.
+//           if (isSitting) {
+//             // Sitting cat can't do anything via keyboard
+//             // (petting is handled by pointer events above)
+//             rootBone.y = 0;
+//             return;
+//           }
+ 
+//           // ── Moving restriction ────────────────────────────────
+//           // When the cat is walking on the ground, the only other
+//           // allowed action is jump. No sitting, no dragging.
+ 
+//           // ── Drag mode ─────────────────────────────────────────
+//           if (!drag.active) {
+ 
+//             // Tilt returns to 0 when not dragging
+//             tilt.vel   += (0 - tilt.angle) * tilt.stiff;
+//             tilt.vel   *= tilt.damping;
+//             tilt.angle += tilt.vel;
+//             container.rotation = tilt.angle;
+ 
+//             // ── Direction flip ──────────────────────────────────
+//             // Only flip on the ground — mid-air flip looks unnatural
+//             if (isOnGround) {
+//               if (movingRight && !facingRight) {
+//                 facingRight       = true;
+//                 character.scale.x = Math.abs(character.scale.x);
+//                 console.log('[MOVE] Flipped right');
+//               } else if (movingLeft && facingRight) {
+//                 facingRight       = false;
+//                 character.scale.x = -Math.abs(character.scale.x);
+//                 console.log('[MOVE] Flipped left');
+//               }
+//             }
+ 
+//             // ── Horizontal movement ──────────────────────────────
+//             if (isOnGround) {
+//               if (movingLeft)  container.x -= CONFIG.MOVE_SPEED;
+//               if (movingRight) container.x += CONFIG.MOVE_SPEED;
+//             } else {
+//               // In the air: only the initial jump impulse moves the cat.
+//               // For VERTICAL jump: velocityX = 0, so no drift.
+//               // For FORWARD jump: velocityX carries momentum.
+//               // Additionally, after a vertical jump the player CAN
+//               // steer slightly by holding A/D — this adds a small force.
+//               if (movingLeft)  velocityX = Math.max(velocityX - 0.3, -CONFIG.MOVE_SPEED);
+//               if (movingRight) velocityX = Math.min(velocityX + 0.3,  CONFIG.MOVE_SPEED);
+//               container.x += velocityX;
+//               velocityX   *= 0.97; // air friction
+//             }
+ 
+//             // Clamp to canvas
+//             container.x = Math.max(0, Math.min(CONFIG.WIDTH, container.x));
+ 
+//             // ── Jump ─────────────────────────────────────────────
+//             // Jump is allowed even while walking (see restriction comment above).
+//             if (jumpPressed && isOnGround) {
+//               isOnGround = false;
+//               const isRunning = movingLeft || movingRight;
+//               if (isRunning) {
+//                 velocityY = -CONFIG.JUMP_FORCE_FORWARD;
+//                 velocityX = facingRight ? CONFIG.JUMP_HORIZONTAL : -CONFIG.JUMP_HORIZONTAL;
+//                 setAnim(CONFIG.ANIM.JUMP_FORWARD, false);
+//                 console.log(`[JUMP] Forward jump — vy=${velocityY}, vx=${velocityX}`);
+//               } else {
+//                 velocityY = -CONFIG.JUMP_FORCE_VERTICAL;
+//                 velocityX = 0;
+//                 // velocityX starts at 0 but player can steer in air (see above)
+//                 setAnim(CONFIG.ANIM.JUMP_VERTICAL, false);
+//                 console.log(`[JUMP] Vertical jump — vy=${velocityY} (air steering enabled)`);
+//               }
+//             }
+ 
+//             // ── Gravity ───────────────────────────────────────────
+//             if (!isOnGround) {
+//               velocityY   += CONFIG.GRAVITY;
+//               container.y += velocityY;
+//               if (container.y >= container._groundY) {
+//                 container.y = container._groundY;
+//                 velocityY   = 0;
+//                 velocityX   = 0;
+//                 isOnGround  = true;
+//                 console.log('[PHYSICS] Landed');
+//               }
+//             }
+ 
+//             // ── Animation selection ───────────────────────────────
+//             if (isOnGround) {
+//               const isMoving = movingLeft || movingRight;
+//               setAnim(isMoving ? CONFIG.ANIM.WALK : CONFIG.ANIM.STAND);
+//             }
+ 
+//           } else {
+//             // ── Drag tilt ─────────────────────────────────────────
+//             const targetTilt = drag.velX * 0.04;
+//             tilt.vel   += (targetTilt - tilt.angle) * tilt.stiff;
+//             tilt.vel   *= tilt.damping;
+//             tilt.angle += tilt.vel;
+//             tilt.angle  = Math.max(-0.6, Math.min(0.6, tilt.angle));
+//             container.rotation = tilt.angle;
+//             setAnim(CONFIG.ANIM.STAND);
+//           }
+ 
+//           // ── Ball physics ──────────────────────────────────────
+//           if (!BALL.dragging) {
+//             // Gravity
+//             BALL.vy += BALL.gravity;
+ 
+//             // Move
+//             BALL.x += BALL.vx;
+//             BALL.y += BALL.vy;
+ 
+//             // Horizontal friction (only when on floor)
+//             if (BALL.y >= CONFIG.FLOOR_Y - BALL.radius) {
+//               BALL.vx *= BALL.friction;
+//             }
+ 
+//             // Floor bounce
+//             if (BALL.y >= CONFIG.FLOOR_Y - BALL.radius) {
+//               BALL.y  = CONFIG.FLOOR_Y - BALL.radius;
+//               BALL.vy = -Math.abs(BALL.vy) * BALL.bounce;
+//               // Stop tiny bounces — looks better than infinite micro-hops
+//               if (Math.abs(BALL.vy) < 1) BALL.vy = 0;
+//             }
+ 
+//             // Wall bounces
+//             if (BALL.x - BALL.radius <= 0) {
+//               BALL.x  = BALL.radius;
+//               BALL.vx = Math.abs(BALL.vx) * BALL.bounce;
+//               console.log('[BALL] Wall bounce left');
+//             }
+//             if (BALL.x + BALL.radius >= CONFIG.WIDTH) {
+//               BALL.x  = CONFIG.WIDTH - BALL.radius;
+//               BALL.vx = -Math.abs(BALL.vx) * BALL.bounce;
+//               console.log('[BALL] Wall bounce right');
+//             }
+ 
+//             // ── Cat ↔ Ball collision ──────────────────────────────
+//             // Simple circle vs circle — cat treated as circle at container pos.
+//             // CAT_RADIUS approximates the cat's body size in world pixels.
+//             const CAT_RADIUS = 45;
+//             const dx   = BALL.x - container.x;
+//             const dy   = BALL.y - (container.y - 80); // offset up to cat body center
+//             const dist = Math.sqrt(dx * dx + dy * dy);
+//             const minDist = BALL.radius + CAT_RADIUS;
+ 
+//             if (dist < minDist && dist > 0) {
+//               // Push ball away from cat
+//               const nx     = dx / dist;
+//               const ny     = dy / dist;
+//               const speed  = Math.sqrt(BALL.vx * BALL.vx + BALL.vy * BALL.vy);
+//               const bounce = Math.max(speed, 4); // minimum kick speed
+//               BALL.vx = nx * bounce * 0.9;
+//               BALL.vy = ny * bounce * 0.9 - 2; // slight upward bias looks fun
+//               // Separate so they don't overlap
+//               BALL.x = container.x + nx * (minDist + 1);
+//               BALL.y = (container.y - 80) + ny * (minDist + 1);
+//               console.log('[BALL] Cat hit! kicked ball');
+//             }
+//           }
+ 
+//           // Update hitArea position to follow ball
+//           ballGfx.hitArea = new PIXI.Circle(BALL.x, BALL.y, BALL.radius * 1.5);
+//           drawBall();
+ 
+//           // Lock root bone Y — prevents walk animation from
+//           // physically moving the character upward each frame
+//           rootBone.y = 0;
+ 
+//           // ── Shake visual ──────────────────────────────────────
+//           // shakeIntensity is set to 1 on shake detection and decays
+//           // here each frame. We apply it as a random offset to the
+//           // container position — the cat rattles around then settles.
+//           if (shakeIntensity > 0.01) {
+//             const s = shakeIntensity * 12; // max pixel offset
+//             container.x += (Math.random() - 0.5) * s;
+//             container.y += (Math.random() - 0.5) * s;
+//             shakeIntensity *= 0.88; // decay — tweak for longer/shorter shake
+//           } else {
+//             shakeIntensity = 0;
+//           }
+//         });
+ 
+//         // Store groundY on container for use inside ticker
+//         container._groundY = container.y;
+//         console.log(`[INIT] Ground Y stored: ${container._groundY.toFixed(1)}`);
+//         console.log('[INIT] All systems ready. Controls: A/D move, W/Space jump, Ctrl sit, drag to throw, pet while sitting');
+//       });
+ 
+//     return () => {
+//       console.log('[CLEANUP] Destroying Pixi app and removing listeners');
+//       purr.pause();
+//       window.removeEventListener('keydown',      onKeyDown);
+//       window.removeEventListener('keyup',        onKeyUp);
+//       window.removeEventListener('devicemotion', onDeviceMotion);
+//       window.removeEventListener('pointerdown',  requestOnInteraction);
+//       if (appRef.current) {
+//         appRef.current.destroy(true, { children: true, texture: true });
+//         appRef.current = null;
+//       }
+//       isInitialized.current = false;
+//     };
+//   }, []);
+ 
+//   return (
+//     <div style={styles.wrapper}>
+//       <h1 style={styles.title}>Cat Game</h1>
+ 
+//       <div style={styles.canvasWrapper}>
+//         <canvas ref={canvasRef} style={{ display: 'block', width: '100%' }} />
+//       </div>
+ 
+//       {/* Desktop HUD — hidden on mobile via CSS in index.html */}
+//       <div className="desktop-hud" style={styles.hud}>
+//         {[
+//           { key: 'A / D',  hint: 'move'       },
+//           { key: 'W',      hint: 'jump'        },
+//           { key: 'Ctrl',   hint: 'sit / stand' },
+//           { key: '🖱 drag', hint: 'throw'      },
+//           { key: '🖱 sit',  hint: 'pet + purr' },
+//         ].map(({ key, hint }) => (
+//           <div key={key} style={styles.keyGroup}>
+//             <span style={styles.key}>{key}</span>
+//             <span style={styles.hint}>{hint}</span>
+//           </div>
+//         ))}
+//       </div>
+ 
+//       {/* Mobile controls — hidden on desktop via CSS in index.html */}
+//       <div className="mobile-controls" style={styles.mobileControls}>
+ 
+//         <div style={styles.dpad}>
+//           <button
+//             style={styles.mBtn}
+//             onPointerDown={() => window.__catVirtualKeys?.pressKey('ArrowLeft')}
+//             onPointerUp={()   => window.__catVirtualKeys?.releaseKey('ArrowLeft')}
+//             onPointerLeave={() => window.__catVirtualKeys?.releaseKey('ArrowLeft')}
+//           >◀</button>
+ 
+//           <button
+//             style={styles.mBtn}
+//             onPointerDown={() => window.__catVirtualKeys?.pressKey('ArrowRight')}
+//             onPointerUp={()   => window.__catVirtualKeys?.releaseKey('ArrowRight')}
+//             onPointerLeave={() => window.__catVirtualKeys?.releaseKey('ArrowRight')}
+//           >▶</button>
+//         </div>
+ 
+//         <div style={styles.actions}>
+//           <button
+//             style={{ ...styles.mBtn, ...styles.mBtnJump }}
+//             onPointerDown={() => window.__catVirtualKeys?.pressKey('ArrowUp')}
+//             onPointerUp={()   => window.__catVirtualKeys?.releaseKey('ArrowUp')}
+//             onPointerLeave={() => window.__catVirtualKeys?.releaseKey('ArrowUp')}
+//           >↑</button>
+ 
+//           <button
+//             style={{ ...styles.mBtn, ...styles.mBtnSit }}
+//             onPointerDown={() => window.__catSitToggle?.()}
+//           >🐱</button>
+//         </div>
+ 
+//       </div>
+//     </div>
+//   );
+// };
+ 
+// const styles = {
+//   wrapper: {
+//     display:        'flex',
+//     flexDirection:  'column',
+//     alignItems:     'center',
+//     justifyContent: 'center',
+//     minHeight:      '100vh',
+//     background:     '#0f0f1a',
+//     fontFamily:     '"Courier New", monospace',
+//     gap:            '16px',
+//   },
+//   title: {
+//     color:         '#e0e0ff',
+//     fontSize:      '1.4rem',
+//     letterSpacing: '0.2em',
+//     textTransform: 'uppercase',
+//     margin:        0,
+//     opacity:       0.7,
+//   },
+//   canvasWrapper: {
+//     border:       '1px solid rgba(255,255,255,0.1)',
+//     borderRadius: '4px',
+//     overflow:     'hidden',
+//     boxShadow:    '0 0 40px rgba(80,80,200,0.15)',
+//   },
+//   hud: {
+//     display:        'flex',
+//     alignItems:     'center',
+//     gap:            '20px',
+//     flexWrap:       'wrap',
+//     justifyContent: 'center',
+//   },
+//   keyGroup: {
+//     display:    'flex',
+//     alignItems: 'center',
+//     gap:        '6px',
+//   },
+//   key: {
+//     display:       'inline-block',
+//     padding:       '4px 10px',
+//     background:    'rgba(255,255,255,0.08)',
+//     border:        '1px solid rgba(255,255,255,0.2)',
+//     borderRadius:  '4px',
+//     color:         '#c0c0ff',
+//     fontSize:      '0.85rem',
+//     fontWeight:    'bold',
+//     letterSpacing: '0.05em',
+//   },
+//   hint: {
+//     color:    'rgba(200,200,255,0.4)',
+//     fontSize: '0.8rem',
+//   },
+//   mobileControls: {
+//     display:        'flex',
+//     justifyContent: 'space-between',
+//     alignItems:     'flex-end',
+//     width:          '100%',
+//     maxWidth:       '800px',
+//     padding:        '0 16px 12px',
+//     boxSizing:      'border-box',
+//   },
+//   dpad: {
+//     display: 'flex',
+//     gap:     '8px',
+//   },
+//   actions: {
+//     display:       'flex',
+//     flexDirection: 'column',
+//     gap:           '8px',
+//     alignItems:    'flex-end',
+//   },
+//   mBtn: {
+//     width:            '64px',
+//     height:           '64px',
+//     borderRadius:     '50%',
+//     background:       'rgba(255,255,255,0.1)',
+//     border:           '2px solid rgba(255,255,255,0.25)',
+//     color:            '#e0e0ff',
+//     fontSize:         '1.4rem',
+//     cursor:           'pointer',
+//     display:          'flex',
+//     alignItems:       'center',
+//     justifyContent:   'center',
+//     userSelect:       'none',
+//     WebkitUserSelect: 'none',
+//     touchAction:      'none',
+//   },
+//   mBtnJump: {
+//     background: 'rgba(100,160,255,0.2)',
+//     border:     '2px solid rgba(100,160,255,0.4)',
+//   },
+//   mBtnSit: {
+//     background: 'rgba(255,160,200,0.2)',
+//     border:     '2px solid rgba(255,160,200,0.4)',
+//     fontSize:   '1.6rem',
+//   },
+// };
+ 
+// export default Game;
