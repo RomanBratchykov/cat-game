@@ -198,21 +198,21 @@ export class CustomSkinSystem extends System {
   _makeSprite(texture, cfg, trim, att) {
     const sprite = new PIXI.Sprite(texture);
 
-    // Anchor: центр оригінального canvas в координатах обрізаного canvas
-    const srcW = trim.sourceW;
-    const srcH = trim.sourceH;
-    sprite.anchor.set(
-      Math.max(0, Math.min(1, (srcW / 2 - trim.minX) / trim.w)),
-      Math.max(0, Math.min(1, (srcH / 2 - trim.minY) / trim.h)),
-    );
+    // Keep the original image center after trimming transparent bounds.
+    // This preserves attachment alignment for padded uploads.
+    const sourceW = Math.max(1, trim.sourceW || trim.w);
+    const sourceH = Math.max(1, trim.sourceH || trim.h);
+    const anchorX = (sourceW * 0.5 - trim.minX) / Math.max(1, trim.w);
+    const anchorY = (sourceH * 0.5 - trim.minY) / Math.max(1, trim.h);
+    sprite.anchor.set(anchorX, anchorY);
 
     // Scale: attachment size (Spine units) / source canvas size (px)
     // Тому що parent має scale(0.5):
     //   screen px = (canvas px) * sprite.scale * 0.5
     //             = canvas px * (att.w / srcW) * 0.5
     //             = att.w * 0.5 screen px per Spine unit ✓
-    const sx = (att.w / srcW) * (cfg.scale ?? 1);
-    const sy = (att.h / srcH) * (cfg.scale ?? 1);
+    const sx = (att.w / sourceW) * (cfg.scale ?? 1);
+    const sy = (att.h / sourceH) * (cfg.scale ?? 1);
     sprite.scale.set(
       Math.min(8, Math.max(0.01, sx)),
       Math.min(8, Math.max(0.01, sy)),

@@ -25,13 +25,76 @@ function readAttachment(attachmentsRoot, slotName, attachmentName) {
   return first && typeof first === 'object' ? first : null;
 }
 
-function normalizeAttachment(attachment, fallback) {
+function parseMeshBounds(vertices) {
+  if (!Array.isArray(vertices) || vertices.length === 0) return null;
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  let i = 0;
+  while (i < vertices.length) {
+    const boneCount = Number(vertices[i++]);
+    if (!Number.isFinite(boneCount) || boneCount <= 0) break;
+
+    for (let b = 0; b < boneCount; b += 1) {
+      // Weighted mesh format: [boneIndex, x, y, weight]
+      i += 1;
+      const x = Number(vertices[i++]);
+      const y = Number(vertices[i++]);
+      i += 1;
+
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+  }
+
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+    return null;
+  }
+
+  const width = maxX - minX;
+  const height = maxY - minY;
+
   return {
-    x: Number.isFinite(attachment?.x) ? attachment.x : fallback.x,
-    y: Number.isFinite(attachment?.y) ? attachment.y : fallback.y,
+    centerX: minX + width / 2,
+    centerY: minY + height / 2,
+    width,
+    height,
+  };
+}
+
+function normalizeAttachment(attachment, fallback) {
+  const meshBounds = attachment?.type === 'mesh'
+    ? parseMeshBounds(attachment?.vertices)
+    : null;
+
+  return {
+    x: Number.isFinite(attachment?.x)
+      ? attachment.x
+      : Number.isFinite(meshBounds?.centerX)
+        ? meshBounds.centerX
+        : fallback.x,
+    y: Number.isFinite(attachment?.y)
+      ? attachment.y
+      : Number.isFinite(meshBounds?.centerY)
+        ? meshBounds.centerY
+        : fallback.y,
     rotation: Number.isFinite(attachment?.rotation) ? attachment.rotation : fallback.rotation,
-    width: Number.isFinite(attachment?.width) ? attachment.width : fallback.width,
-    height: Number.isFinite(attachment?.height) ? attachment.height : fallback.height,
+    width: Number.isFinite(attachment?.width)
+      ? attachment.width
+      : Number.isFinite(meshBounds?.width)
+        ? meshBounds.width
+        : fallback.width,
+    height: Number.isFinite(attachment?.height)
+      ? attachment.height
+      : Number.isFinite(meshBounds?.height)
+        ? meshBounds.height
+        : fallback.height,
   };
 }
 
