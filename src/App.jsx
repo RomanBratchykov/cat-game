@@ -130,6 +130,11 @@ function sanitizeError(error, fallback = 'Unexpected error') {
   return error?.message || fallback;
 }
 
+function isAuthLockError(error) {
+  const message = String(error?.message || '');
+  return message.includes('lock:sb-') && message.includes('stole it');
+}
+
 function toPresencePlayers(presenceState) {
   const players = [];
   const now = Date.now();
@@ -295,6 +300,13 @@ const App = () => {
         await loadUserData(currentUser);
       } catch (error) {
         if (!isActive) return;
+
+        if (isAuthLockError(error)) {
+          setScreen(SCREEN.AUTH);
+          setErrorText('Session is locked by another tab. Use different URLs like ?auth=a and ?auth=b to test two accounts on one device.');
+          return;
+        }
+
         setScreen(SCREEN.ERROR);
         setErrorText(sanitizeError(error, 'Failed to initialize session.'));
       }
