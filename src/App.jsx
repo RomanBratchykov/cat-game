@@ -4,7 +4,7 @@ import { Game } from './game/Game.js';
 import { CONFIG } from './config.js';
 import { isSupabaseConfigured, supabase } from './lib/supabaseClient.js';
 import { catRecordToEditorInitial, ensureProfile, getMyCat, saveMyCat } from './lib/catPersistence.js';
-import { canvasesToDataUrls, dataUrlsToCanvases } from './lib/catSkin.js';
+import { buildSkinCanvasesFromCat, canvasesToDataUrls } from './lib/catSkin.js';
 
 const SCREEN = {
   LOADING: 'loading',
@@ -378,7 +378,7 @@ const App = () => {
     }
 
     const loadedCanvases = await withTimeout(
-      dataUrlsToCanvases(cat.skin_parts || {}),
+      buildSkinCanvasesFromCat(cat),
       LOAD_DATA_TIMEOUT_MS,
       'Skin image loading timed out. Please re-open the editor.'
     );

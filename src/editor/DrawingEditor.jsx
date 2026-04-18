@@ -87,17 +87,43 @@ function mergePartLibraries(primary, fallback) {
   PART_KEYS.forEach((partKey) => {
     const output = [];
     const seenUrls = new Set();
+    const byUrlIndex = new Map();
 
-    const appendList = (list) => {
+    const appendList = (list, isFallback = false) => {
       (list || []).forEach((item) => {
-        if (!item?.dataUrl || seenUrls.has(item.dataUrl)) return;
+        if (!item?.dataUrl) return;
+
+        if (seenUrls.has(item.dataUrl)) {
+          // If the fallback copy is the canonical system default,
+          // promote the existing duplicate to default as well.
+          if (isFallback && item.isSystemDefault) {
+            const index = byUrlIndex.get(item.dataUrl);
+            if (Number.isInteger(index) && output[index]) {
+              output[index] = {
+                ...output[index],
+                isSystemDefault: true,
+                id: `system-default-${partKey}`,
+              };
+            }
+          }
+          return;
+        }
+
         seenUrls.add(item.dataUrl);
+        byUrlIndex.set(item.dataUrl, output.length);
         output.push({ ...item });
       });
     };
 
-    appendList(primary?.[partKey]);
-    appendList(fallback?.[partKey]);
+    appendList(primary?.[partKey], false);
+    appendList(fallback?.[partKey], true);
+
+    const systemDefault = output.find((item) => item.isSystemDefault) || null;
+    if (systemDefault) {
+      const rest = output.filter((item) => item.id !== systemDefault.id);
+      merged[partKey] = [systemDefault, ...rest];
+      return;
+    }
 
     merged[partKey] = output;
   });
@@ -230,15 +256,17 @@ function sanitizeSelectedParts(raw, partLibrary) {
 
   PART_KEYS.forEach((partKey) => {
     const hasExplicitKey = raw && Object.prototype.hasOwnProperty.call(raw, partKey);
-    const desiredId = typeof raw?.[partKey] === 'string' ? raw[partKey] : null;
+    const rawValue = hasExplicitKey ? raw?.[partKey] : undefined;
+    const desiredId = typeof rawValue === 'string' ? rawValue : null;
     const exists = desiredId && (partLibrary[partKey] || []).some((item) => item.id === desiredId);
+    const systemDefault = (partLibrary[partKey] || []).find((item) => item.isSystemDefault);
 
     if (hasExplicitKey) {
-      selected[partKey] = exists ? desiredId : null;
+      // Migrate stale/legacy selections (including null) to system defaults.
+      selected[partKey] = exists ? desiredId : (systemDefault?.id || partLibrary[partKey]?.[0]?.id || null);
       return;
     }
 
-    const systemDefault = (partLibrary[partKey] || []).find((item) => item.isSystemDefault);
     selected[partKey] = systemDefault?.id || partLibrary[partKey]?.[0]?.id || null;
   });
 
@@ -540,6 +568,7 @@ const DrawingEditor = ({
   const [partLibrary, setPartLibrary] = useState(initialState.partLibrary);
   const [selectedParts, setSelectedParts] = useState(initialState.selectedParts);
   const [customPartCanvases, setCustomPartCanvases] = useState({});
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     try {
@@ -572,10 +601,12 @@ const DrawingEditor = ({
       const nextCanvases = {};
 
       for (const partKey of PART_KEYS) {
-        const selectedId = selectedParts[partKey];
+        const list = partLibrary[partKey] || [];
+        const systemDefaultId = list.find((item) => item.isSystemDefault)?.id || null;
+        const selectedId = selectedParts[partKey] || systemDefaultId;
         if (!selectedId) continue;
 
-        const entry = partLibrary[partKey]?.find((item) => item.id === selectedId);
+        const entry = list.find((item) => item.id === selectedId);
         if (!entry?.dataUrl) continue;
 
         try {
@@ -654,30 +685,72 @@ const DrawingEditor = ({
 
     setSelectedParts((prev) => {
       if (prev[partKey] !== partId) return prev;
+      const systemDefaultId = (partLibrary[partKey] || []).find((item) => item.isSystemDefault)?.id || null;
       return {
         ...prev,
-        [partKey]: null,
+        [partKey]: systemDefaultId,
       };
     });
   };
 
   const partSourceLabel = (partKey) => {
-    const selectedId = selectedParts[partKey];
+    const list = partLibrary[partKey] || [];
+    const systemDefaultId = list.find((item) => item.isSystemDefault)?.id || null;
+    const selectedId = selectedParts[partKey] || systemDefaultId;
     if (!selectedId) return 'Game default';
 
-    const selected = (partLibrary[partKey] || []).find((item) => item.id === selectedId);
+    const selected = list.find((item) => item.id === selectedId);
     if (!selected) return 'Game default';
     if (selected.isSystemDefault) return 'System default';
     return 'Selected image';
   };
 
-  const handleComplete = () => {
-    onComplete({
-      parts,
-      kitten,
-      selectedParts,
-      partLibrary,
-    });
+  const resolveEntryForPart = (partKey) => {
+    const list = partLibrary[partKey] || [];
+    const selectedId = selectedParts[partKey];
+
+    return (
+      list.find((item) => item.id === selectedId) ||
+      list.find((item) => item.isSystemDefault) ||
+      list[0] ||
+      null
+    );
+  };
+
+  const buildCompleteParts = async () => {
+    const next = { ...parts };
+
+    for (const partKey of PART_KEYS) {
+      if (next[partKey]) continue;
+
+      const entry = resolveEntryForPart(partKey);
+      if (!entry?.dataUrl) continue;
+
+      try {
+        next[partKey] = await decodeImageToCanvas(entry.dataUrl, partKey);
+      } catch {
+        // Ignore decode failures; game fallback will render this part.
+      }
+    }
+
+    return next;
+  };
+
+  const handleComplete = async () => {
+    if (saving) return;
+    setSaving(true);
+
+    try {
+      const completeParts = await buildCompleteParts();
+      onComplete({
+        parts: completeParts,
+        kitten,
+        selectedParts,
+        partLibrary,
+      });
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -707,6 +780,8 @@ const DrawingEditor = ({
             {PART_KEYS.map((partKey) => {
               const list = partLibrary[partKey] || [];
               const selectedId = selectedParts[partKey];
+              const systemDefaultId = list.find((item) => item.isSystemDefault)?.id || null;
+              const effectiveSelectedId = selectedId || systemDefaultId;
 
               return (
                 <div key={partKey} style={s.customPartCard}>
@@ -732,15 +807,15 @@ const DrawingEditor = ({
                       type="button"
                       style={{
                         ...s.generatedChoice,
-                        ...(selectedId ? null : s.generatedChoiceActive),
+                        ...(effectiveSelectedId === systemDefaultId ? s.generatedChoiceActive : null),
                       }}
-                      onClick={() => choosePart(partKey, null)}
+                      onClick={() => choosePart(partKey, systemDefaultId)}
                     >
-                      Use game default
+                      Use system default
                     </button>
 
                     {list.map((item) => {
-                      const isSelected = item.id === selectedId;
+                      const isSelected = item.id === effectiveSelectedId;
 
                       return (
                         <div key={item.id} style={s.choiceItemWrap}>
@@ -782,7 +857,9 @@ const DrawingEditor = ({
           </div>
 
           <div style={s.actionsRow}>
-            <button style={s.primaryBtn} onClick={handleComplete}>Play as this kitten</button>
+            <button style={s.primaryBtn} onClick={handleComplete} disabled={saving}>
+              {saving ? 'Preparing kitten...' : 'Play as this kitten'}
+            </button>
           </div>
         </div>
 
