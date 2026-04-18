@@ -17,6 +17,8 @@ const SCREEN = {
 const CHAT_MAX_LENGTH = 120;
 const CHAT_POOL_LIMIT = 40;
 const PRESENCE_STALE_AFTER_MS = 15000;
+const REMOTE_BROADCAST_STALE_AFTER_MS = 8000;
+const PRESENCE_TRACK_INTERVAL_MS = 1400;
 const LOAD_DATA_TIMEOUT_MS = 16000;
 const DEFAULT_SCENE_ROOM = 'courtyard';
 
@@ -133,23 +135,56 @@ function toPresencePlayers(presenceState) {
     if (list.length === 0) return;
 
     const meta = list[list.length - 1];
-    const updatedAt = Number(meta?.updatedAt);
+    const player = normalizeRealtimePlayer(meta, presenceKey);
+    if (!player) return;
+
+    const updatedAt = player.updatedAt;
     if (Number.isFinite(updatedAt) && now - updatedAt > PRESENCE_STALE_AFTER_MS) {
       return;
     }
 
-    players.push({
-      presenceKey,
-      userId: typeof meta?.userId === 'string' ? meta.userId : presenceKey,
-      name: typeof meta?.name === 'string' ? meta.name : 'Cat player',
-      x: Number.isFinite(meta?.x) ? meta.x : CONFIG.WIDTH / 2,
-      y: Number.isFinite(meta?.y) ? meta.y : CONFIG.FLOOR_Y,
-      facingRight: meta?.facingRight !== false,
-      sceneRoom: typeof meta?.sceneRoom === 'string' ? meta.sceneRoom : DEFAULT_SCENE_ROOM,
-    });
+    players.push(player);
   });
 
   return players;
+}
+
+function normalizeRealtimePlayer(payload, fallbackPresenceKey = '') {
+  const payloadPresenceKey = typeof payload?.presenceKey === 'string' ? payload.presenceKey.trim() : '';
+  const payloadUserId = typeof payload?.userId === 'string' ? payload.userId.trim() : '';
+  const presenceKey = payloadPresenceKey || fallbackPresenceKey || payloadUserId;
+  if (!presenceKey) return null;
+
+  const parsedX = Number(payload?.x);
+  const parsedY = Number(payload?.y);
+  const parsedUpdatedAt = Number(payload?.updatedAt);
+
+  return {
+    presenceKey,
+    userId: payloadUserId || presenceKey,
+    name: typeof payload?.name === 'string' ? payload.name : 'Cat player',
+    x: Number.isFinite(parsedX) ? parsedX : CONFIG.WIDTH / 2,
+    y: Number.isFinite(parsedY) ? parsedY : CONFIG.FLOOR_Y,
+    facingRight: payload?.facingRight !== false,
+    sceneRoom: typeof payload?.sceneRoom === 'string' ? payload.sceneRoom : DEFAULT_SCENE_ROOM,
+    updatedAt: Number.isFinite(parsedUpdatedAt) ? parsedUpdatedAt : Date.now(),
+  };
+}
+
+function mergeRealtimePlayers(primary = [], secondary = []) {
+  const byPresence = new Map();
+
+  const applyPlayer = (rawPlayer) => {
+    const normalized = normalizeRealtimePlayer(rawPlayer, rawPlayer?.presenceKey || '');
+    if (!normalized) return;
+
+    const previous = byPresence.get(normalized.presenceKey);
+    byPresence.set(normalized.presenceKey, previous ? { ...previous, ...normalized } : normalized);
+  };
+
+  primary.forEach(applyPlayer);
+  secondary.forEach(applyPlayer);
+  return Array.from(byPresence.values());
 }
 
 const App = () => {
@@ -167,6 +202,7 @@ const App = () => {
   const [errorText, setErrorText] = useState('');
 
   const [onlinePlayers, setOnlinePlayers] = useState([]);
+  const [broadcastPlayers, setBroadcastPlayers] = useState([]);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatText, setChatText] = useState('');
   const [chatMessages, setChatMessages] = useState([]);
@@ -184,6 +220,7 @@ const App = () => {
   const roomChannelRef = useRef(null);
   const localPresenceRef = useRef(null);
   const localPresenceKeyRef = useRef('');
+  const lastPresenceTrackAtRef = useRef(0);
   const chatInputRef = useRef(null);
   const tabIdRef = useRef(createTabId());
   const roomLinkResetTimerRef = useRef(null);
@@ -713,16 +750,25 @@ const App = () => {
         const localPresence = localPresenceRef.current;
         if (!channel || !localPresence) return;
 
+        const now = Date.now();
+
         const nextPresence = {
           ...localPresence,
           ...state,
+          updatedAt: now,
         };
         localPresenceRef.current = nextPresence;
 
-        channel.track({
-          ...nextPresence,
-          updatedAt: Date.now(),
-        });
+        channel.send({
+          type: 'broadcast',
+          event: 'state',
+          payload: nextPresence,
+        }).catch(() => {});
+
+        if (now - lastPresenceTrackAtRef.current >= PRESENCE_TRACK_INTERVAL_MS) {
+          lastPresenceTrackAtRef.current = now;
+          channel.track(nextPresence).catch(() => {});
+        }
       },
       onSceneChanged: (nextScene) => {
         const title = typeof nextScene?.title === 'string' ? nextScene.title : 'Room';
@@ -762,10 +808,16 @@ const App = () => {
     gameRef.current.applySkin(skinCanvases);
   }, [skinCanvases]);
 
+  const onlineCount = useMemo(() => {
+    return mergeRealtimePlayers(onlinePlayers, broadcastPlayers).length;
+  }, [onlinePlayers, broadcastPlayers]);
+
   const remotePlayers = useMemo(() => {
     if (!user) return [];
-    return onlinePlayers.filter((player) => player.presenceKey !== localPresenceKeyRef.current);
-  }, [onlinePlayers, user]);
+
+    const mergedPlayers = mergeRealtimePlayers(onlinePlayers, broadcastPlayers);
+    return mergedPlayers.filter((player) => player.presenceKey !== localPresenceKeyRef.current);
+  }, [onlinePlayers, broadcastPlayers, user]);
 
   useEffect(() => {
     if (!gameRef.current) return;
@@ -920,6 +972,10 @@ const App = () => {
     const channel = supabase.channel(ROOM_CHANNEL, {
       config: {
         presence: { key: localPresenceKey },
+        broadcast: {
+          self: false,
+          ack: false,
+        },
       },
     });
 
@@ -942,21 +998,48 @@ const App = () => {
     const trackPresence = async () => {
       if (isDisposed || !localPresenceRef.current) return;
       try {
+        const now = Date.now();
         const nextPresence = {
           ...localPresenceRef.current,
-          updatedAt: Date.now(),
+          updatedAt: now,
         };
         localPresenceRef.current = nextPresence;
+        lastPresenceTrackAtRef.current = now;
         await channel.track(nextPresence);
         syncPresenceState();
-      } catch {
-        // Ignore transient realtime errors; reconnect handlers will retry.
+      } catch (error) {
+        console.warn('[Realtime] Presence track failed:', error?.message || error);
       }
     };
 
     channel.on('presence', { event: 'sync' }, syncPresenceState);
     channel.on('presence', { event: 'join' }, syncPresenceState);
     channel.on('presence', { event: 'leave' }, syncPresenceState);
+
+    channel.on('broadcast', { event: 'state' }, (event) => {
+      const payload = event?.payload || event || {};
+      const remotePlayer = normalizeRealtimePlayer(payload, payload?.presenceKey || payload?.userId || '');
+      if (!remotePlayer) return;
+      if (remotePlayer.presenceKey === localPresenceKeyRef.current) return;
+
+      setBroadcastPlayers((prev) => {
+        const now = Date.now();
+        const nextByKey = new Map();
+
+        prev.forEach((player) => {
+          const updatedAt = Number(player?.updatedAt);
+          if (Number.isFinite(updatedAt) && now - updatedAt > REMOTE_BROADCAST_STALE_AFTER_MS) {
+            return;
+          }
+          if (player?.presenceKey) {
+            nextByKey.set(player.presenceKey, player);
+          }
+        });
+
+        nextByKey.set(remotePlayer.presenceKey, remotePlayer);
+        return Array.from(nextByKey.values());
+      });
+    });
 
     channel.on('broadcast', { event: 'chat' }, (event) => {
       const payload = event?.payload || event || {};
@@ -989,7 +1072,7 @@ const App = () => {
 
       if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR') {
         supabase.realtime.connect();
-        syncPresenceState();
+        trackPresence();
       }
     });
 
@@ -1007,15 +1090,18 @@ const App = () => {
       document.removeEventListener('visibilitychange', refreshRealtime);
       window.removeEventListener('online', refreshRealtime);
       setOnlinePlayers([]);
+      setBroadcastPlayers([]);
       roomChannelRef.current = null;
       localPresenceRef.current = null;
       localPresenceKeyRef.current = '';
+      lastPresenceTrackAtRef.current = 0;
       supabase.removeChannel(channel);
     };
   }, [screen, user, catRecord?.name, appendChatMessage]);
 
   useEffect(() => {
     if (screen === SCREEN.ROOM) return;
+    setBroadcastPlayers([]);
     setChatMessages([]);
   }, [screen]);
 
@@ -1141,7 +1227,7 @@ const App = () => {
           <h1 style={styles.roomTitle}>Room: {ROOM_NAME}</h1>
           <p style={styles.sceneTitle}>Zone: {sceneInfo.title}</p>
           <p style={styles.p}>
-            You are {catRecord?.name || 'My Cat'} | Online: {onlinePlayers.length}
+            You are {catRecord?.name || 'My Cat'} | Online: {onlineCount}
           </p>
           <p style={styles.sceneHint}>{sceneInfo.hint}</p>
         </div>
