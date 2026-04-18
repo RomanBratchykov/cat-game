@@ -31,6 +31,7 @@ const DEFAULT_KITTEN = {
 const STORAGE_KEY_KITTEN = 'catGame.kittenBuilder.v2';
 const STORAGE_KEY_PART_LIBRARY = 'catGame.kittenPartLibrary.v2';
 const STORAGE_KEY_SELECTED_PARTS = 'catGame.kittenSelectedParts.v2';
+const MAX_UPLOAD_FILE_BYTES = 1024 * 1024;
 
 const DEFAULT_PART_IMAGE_MODULES = import.meta.glob('../assets/Pngs/*.{png,jpg,jpeg,webp}', {
   eager: true,
@@ -569,6 +570,7 @@ const DrawingEditor = ({
   const [selectedParts, setSelectedParts] = useState(initialState.selectedParts);
   const [customPartCanvases, setCustomPartCanvases] = useState({});
   const [saving, setSaving] = useState(false);
+  const [uploadNotice, setUploadNotice] = useState('');
 
   useEffect(() => {
     try {
@@ -639,7 +641,18 @@ const DrawingEditor = ({
   }, [customPartCanvases]);
 
   const uploadPart = async (partKey, file) => {
-    if (!file || !file.type.startsWith('image/')) return;
+    setUploadNotice('');
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      setUploadNotice('Only image files are allowed for skin parts.');
+      return;
+    }
+
+    if (file.size > MAX_UPLOAD_FILE_BYTES) {
+      setUploadNotice('Image is too large. Maximum allowed upload size is 1 MB.');
+      return;
+    }
 
     try {
       const dataUrl = await readFileAsDataUrl(file);
@@ -663,6 +676,7 @@ const DrawingEditor = ({
         [partKey]: newEntry.id,
       }));
     } catch (error) {
+      setUploadNotice('Could not process this image. Try a different file.');
       console.warn('[Editor] Failed to upload part image', error);
     }
   };
@@ -775,7 +789,8 @@ const DrawingEditor = ({
 
           <div style={s.customSection}>
             <h3 style={s.customHeading}>Body part image library</h3>
-            <p style={s.customHint}>Only your uploaded/default images are used. Missing parts fallback to the in-game skeleton default.</p>
+            <p style={s.customHint}>Only your uploaded/default images are used. Missing parts fallback to the in-game skeleton default. Max upload size: 1 MB.</p>
+            {uploadNotice ? <p style={s.uploadNotice}>{uploadNotice}</p> : null}
 
             {PART_KEYS.map((partKey) => {
               const list = partLibrary[partKey] || [];
@@ -963,6 +978,11 @@ const s = {
     margin: 0,
     fontSize: 12,
     opacity: 0.75,
+  },
+  uploadNotice: {
+    margin: 0,
+    fontSize: 12,
+    color: '#ffcf9d',
   },
   customPartCard: {
     display: 'flex',

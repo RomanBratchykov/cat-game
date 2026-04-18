@@ -42,6 +42,7 @@ const REMOTE_INTERPOLATION_FACTOR = 0.2;
 const REMOTE_SNAP_DISTANCE_PX = 240;
 const REMOTE_MOVE_HOLD_MS = 220;
 const MAX_RENDER_RESOLUTION = 1.5;
+const LOCAL_STATE_EMIT_INTERVAL_MS = 90;
 
 const SCENE_ROOMS = {
   courtyard: {
@@ -181,8 +182,8 @@ export class Game {
     this._onInteract = typeof options.onInteract === 'function'
       ? options.onInteract
       : null;
-    this._showRemoteAcrossRooms = options.showRemoteAcrossRooms !== false;
-    this._emitStateEveryMs = 70;
+    this._showRemoteAcrossRooms = options.showRemoteAcrossRooms === true;
+    this._emitStateEveryMs = LOCAL_STATE_EMIT_INTERVAL_MS;
     this._emitStateClock = 0;
     this._remotePlayers = new Map();
     this._pendingRemotePlayers = [];
@@ -198,13 +199,14 @@ export class Game {
     this._sceneObjectLayer = null;
 
     const renderResolution = Math.min(window.devicePixelRatio || 1, MAX_RENDER_RESOLUTION);
+    const isCoarsePointer = window.matchMedia?.('(pointer: coarse)')?.matches || false;
 
     this._app = new PIXI.Application({
       width:           CONFIG.WIDTH,
       height:          CONFIG.HEIGHT,
       backgroundColor: CONFIG.BG_COLOR,
       view:            canvas,
-      antialias:       true,
+      antialias:       !isCoarsePointer,
       resolution:      renderResolution,
       autoDensity:     true,
     });

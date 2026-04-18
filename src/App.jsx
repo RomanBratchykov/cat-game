@@ -24,6 +24,8 @@ const PRESENCE_HEARTBEAT_INTERVAL_MS = 3000;
 const REALTIME_RESTART_COOLDOWN_MS = 1800;
 const LOAD_DATA_TIMEOUT_MS = 16000;
 const SKIN_REQUEST_COOLDOWN_MS = 3200;
+const BROADCAST_FLUSH_DELAY_MS = 110;
+const REMOTE_SKIN_CACHE_LIMIT = 48;
 const DEFAULT_SCENE_ROOM = 'courtyard';
 
 const ROOM_NAME_PARAM = new URLSearchParams(window.location.search).get('room');
@@ -200,6 +202,22 @@ function buildSkinSignature(skinParts) {
     .join('|');
 }
 
+function setCappedMapValue(map, key, value, limit) {
+  if (!map || !key) return;
+
+  if (map.has(key)) {
+    map.delete(key);
+  }
+
+  map.set(key, value);
+
+  while (map.size > limit) {
+    const oldestKey = map.keys().next().value;
+    if (typeof oldestKey === 'undefined') break;
+    map.delete(oldestKey);
+  }
+}
+
 const App = () => {
   const [screen, setScreen] = useState(SCREEN.LOADING);
   const [user, setUser] = useState(null);
@@ -237,7 +255,9 @@ const App = () => {
   const lastPresenceTrackAtRef = useRef(0);
   const lastRealtimeRestartAtRef = useRef(0);
   const remoteSkinByPresenceRef = useRef(new Map());
+  const remoteSkinByUserRef = useRef(new Map());
   const remoteSkinSignatureRef = useRef(new Map());
+  const remoteUserByPresenceRef = useRef(new Map());
   const pendingSkinRequestAtRef = useRef(new Map());
   const broadcastPlayersByPresenceRef = useRef(new Map());
   const broadcastFlushTimerRef = useRef(null);
@@ -552,37 +572,68 @@ const App = () => {
 
   const applyRemoteSkinToGame = useCallback((presenceKey, skinParts) => {
     if (!presenceKey) return;
-    if (!gameRef.current?.setRemotePlayerSkin) return;
 
     const sanitized = skinParts && Object.keys(skinParts).length > 0 ? skinParts : null;
+    const previous = remoteSkinByPresenceRef.current.get(presenceKey);
+
     remoteSkinByPresenceRef.current.set(presenceKey, sanitized);
+    if (previous === sanitized) return;
+
+    if (!gameRef.current?.setRemotePlayerSkin) return;
     gameRef.current.setRemotePlayerSkin(presenceKey, sanitized);
   }, []);
 
-  const handleRemoteSkinPayload = useCallback((presenceKey, payload) => {
+  const handleRemoteSkinPayload = useCallback((presenceKey, userId, payload) => {
     if (!presenceKey) return;
 
     const signature = buildSkinSignature(payload);
-    if (remoteSkinSignatureRef.current.get(presenceKey) === signature) {
+    const presenceSignatureKey = `presence:${presenceKey}`;
+    const userSignatureKey = userId ? `user:${userId}` : '';
+
+    if (remoteSkinSignatureRef.current.get(presenceSignatureKey) === signature) {
       return;
     }
 
-    remoteSkinSignatureRef.current.set(presenceKey, signature);
+    if (userSignatureKey && remoteSkinSignatureRef.current.get(userSignatureKey) === signature) {
+      if (remoteSkinByUserRef.current.has(userId)) {
+        const cachedParts = remoteSkinByUserRef.current.get(userId);
+        remoteUserByPresenceRef.current.set(presenceKey, userId);
+        applyRemoteSkinToGame(presenceKey, cachedParts);
+      }
+      remoteSkinSignatureRef.current.set(presenceSignatureKey, signature);
+      return;
+    }
+
+    remoteSkinSignatureRef.current.set(presenceSignatureKey, signature);
+    if (userSignatureKey) {
+      remoteSkinSignatureRef.current.set(userSignatureKey, signature);
+      remoteUserByPresenceRef.current.set(presenceKey, userId);
+    }
 
     if (signature === '') {
       applyRemoteSkinToGame(presenceKey, null);
+      if (userId) {
+        setCappedMapValue(remoteSkinByUserRef.current, userId, null, REMOTE_SKIN_CACHE_LIMIT);
+      }
       return;
     }
 
     dataUrlsToCanvases(payload)
       .then((parts) => {
-        if (remoteSkinSignatureRef.current.get(presenceKey) !== signature) {
+        if (remoteSkinSignatureRef.current.get(presenceSignatureKey) !== signature) {
           return;
+        }
+
+        if (userId) {
+          setCappedMapValue(remoteSkinByUserRef.current, userId, parts, REMOTE_SKIN_CACHE_LIMIT);
         }
         applyRemoteSkinToGame(presenceKey, parts);
       })
       .catch((error) => {
-        remoteSkinSignatureRef.current.delete(presenceKey);
+        remoteSkinSignatureRef.current.delete(presenceSignatureKey);
+        if (userSignatureKey) {
+          remoteSkinSignatureRef.current.delete(userSignatureKey);
+        }
         console.warn('[RemoteSkin] Failed to decode skin payload', error?.message || error);
       });
   }, [applyRemoteSkinToGame]);
@@ -892,6 +943,7 @@ const App = () => {
     if (!canvasRef.current) return undefined;
 
     const game = new Game(canvasRef.current, {
+      showRemoteAcrossRooms: false,
       onLocalState: (state) => {
         const channel = roomChannelRef.current;
         const localPresence = localPresenceRef.current;
@@ -969,8 +1021,14 @@ const App = () => {
     if (!user) return [];
 
     const mergedPlayers = mergeRealtimePlayers(onlinePlayers, broadcastPlayers);
-    return mergedPlayers.filter((player) => player.presenceKey !== localPresenceKeyRef.current);
-  }, [onlinePlayers, broadcastPlayers, user]);
+    const localSceneRoom = sceneInfo?.id || DEFAULT_SCENE_ROOM;
+
+    return mergedPlayers.filter((player) => {
+      if (player.presenceKey === localPresenceKeyRef.current) return false;
+      const remoteSceneRoom = typeof player?.sceneRoom === 'string' ? player.sceneRoom : DEFAULT_SCENE_ROOM;
+      return remoteSceneRoom === localSceneRoom;
+    });
+  }, [onlinePlayers, broadcastPlayers, sceneInfo?.id, user]);
 
   const connectionChats = useMemo(() => {
     const byConnection = new Map();
@@ -1032,7 +1090,8 @@ const App = () => {
     Array.from(remoteSkinByPresenceRef.current.keys()).forEach((presenceKey) => {
       if (activeKeys.has(presenceKey)) return;
       remoteSkinByPresenceRef.current.delete(presenceKey);
-      remoteSkinSignatureRef.current.delete(presenceKey);
+      remoteSkinSignatureRef.current.delete(`presence:${presenceKey}`);
+      remoteUserByPresenceRef.current.delete(presenceKey);
       pendingSkinRequestAtRef.current.delete(presenceKey);
     });
 
@@ -1044,11 +1103,19 @@ const App = () => {
 
     remotePlayers.forEach((player) => {
       const remotePresenceKey = player?.presenceKey;
+      const remoteUserId = typeof player?.userId === 'string' ? player.userId : '';
       if (!remotePresenceKey || remotePresenceKey === localPresenceKey) return;
 
       if (remoteSkinByPresenceRef.current.has(remotePresenceKey)) {
-        const existingParts = remoteSkinByPresenceRef.current.get(remotePresenceKey);
-        game.setRemotePlayerSkin(remotePresenceKey, existingParts);
+        if (remoteUserId) {
+          remoteUserByPresenceRef.current.set(remotePresenceKey, remoteUserId);
+        }
+        return;
+      }
+
+      if (remoteUserId && remoteSkinByUserRef.current.has(remoteUserId)) {
+        remoteUserByPresenceRef.current.set(remotePresenceKey, remoteUserId);
+        applyRemoteSkinToGame(remotePresenceKey, remoteSkinByUserRef.current.get(remoteUserId));
         return;
       }
 
@@ -1070,7 +1137,7 @@ const App = () => {
         console.warn('[Realtime] skin-request failed', error?.message || error);
       });
     });
-  }, [remotePlayers]);
+  }, [applyRemoteSkinToGame, remotePlayers]);
 
   useEffect(() => {
     if (screen !== SCREEN.ROOM) {
@@ -1313,7 +1380,7 @@ const App = () => {
       broadcastFlushTimerRef.current = window.setTimeout(() => {
         broadcastFlushTimerRef.current = null;
         flushBroadcastPlayers();
-      }, 90);
+      }, BROADCAST_FLUSH_DELAY_MS);
     };
 
     const trackPresence = async () => {
@@ -1380,12 +1447,13 @@ const App = () => {
     channel.on('broadcast', { event: 'skin-sync' }, (event) => {
       const payload = event?.payload || event || {};
       const sourcePresenceKey = typeof payload.presenceKey === 'string' ? payload.presenceKey : '';
+      const sourceUserId = typeof payload.userId === 'string' ? payload.userId : '';
       const targetPresenceKey = typeof payload.targetPresenceKey === 'string' ? payload.targetPresenceKey : '';
       if (!sourcePresenceKey || sourcePresenceKey === localPresenceKeyRef.current) return;
       if (targetPresenceKey && targetPresenceKey !== localPresenceKeyRef.current) return;
 
       pendingSkinRequestAtRef.current.delete(sourcePresenceKey);
-      handleRemoteSkinPayload(sourcePresenceKey, payload.skinParts || null);
+      handleRemoteSkinPayload(sourcePresenceKey, sourceUserId, payload.skinParts || null);
     });
 
     channel.on('broadcast', { event: 'skin-request' }, (event) => {
@@ -1480,6 +1548,7 @@ const App = () => {
     }
     setChatMessages([]);
     remoteSkinByPresenceRef.current.clear();
+    remoteUserByPresenceRef.current.clear();
     remoteSkinSignatureRef.current.clear();
     pendingSkinRequestAtRef.current.clear();
   }, [screen]);
