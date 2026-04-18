@@ -18,16 +18,23 @@ const CHAT_MAX_LENGTH = 120;
 const CHAT_POOL_LIMIT = 40;
 const PRESENCE_STALE_AFTER_MS = 15000;
 const LOAD_DATA_TIMEOUT_MS = 16000;
+const DEFAULT_SCENE_ROOM = 'courtyard';
 
+const ROOM_NAME_PARAM = new URLSearchParams(window.location.search).get('room');
 const ROOM_NAME =
-  new URLSearchParams(window.location.search).get('room') ||
-  import.meta.env.VITE_DEFAULT_ROOM ||
+  String(ROOM_NAME_PARAM || import.meta.env.VITE_DEFAULT_ROOM || 'main')
+    .trim()
+    .toLowerCase() ||
   'main';
 const ROOM_CHANNEL = `cat-room-${ROOM_NAME}`;
 
 const DECOR_IMAGES = ['/assets/heart.png', '/assets/star.png'];
 const JOYSTICK_RANGE_PX = 36;
 const JOYSTICK_DEAD_ZONE_PX = 12;
+const THEME_TRACKS = {
+  editor: '/assets/cattheme3.mp3',
+  room: '/assets/cattheme2.mp3',
+};
 
 function createTabId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -138,6 +145,7 @@ function toPresencePlayers(presenceState) {
       x: Number.isFinite(meta?.x) ? meta.x : CONFIG.WIDTH / 2,
       y: Number.isFinite(meta?.y) ? meta.y : CONFIG.FLOOR_Y,
       facingRight: meta?.facingRight !== false,
+      sceneRoom: typeof meta?.sceneRoom === 'string' ? meta.sceneRoom : DEFAULT_SCENE_ROOM,
     });
   });
 
@@ -164,6 +172,12 @@ const App = () => {
   const [chatMessages, setChatMessages] = useState([]);
   const [roomLinkCopied, setRoomLinkCopied] = useState(false);
   const [joystickOffset, setJoystickOffset] = useState({ x: 0, y: 0 });
+  const [musicBlocked, setMusicBlocked] = useState(false);
+  const [sceneInfo, setSceneInfo] = useState({
+    id: DEFAULT_SCENE_ROOM,
+    title: 'Courtyard',
+    hint: 'Move to room edges and press E near objects.',
+  });
 
   const canvasRef = useRef(null);
   const gameRef = useRef(null);
@@ -177,10 +191,78 @@ const App = () => {
   const userRef = useRef(null);
   const lastLoadedUserRef = useRef(null);
   const joystickActiveRef = useRef(false);
+  const joystickPointerIdRef = useRef(null);
+  const jumpPointerIdRef = useRef(null);
+  const themeAudioRef = useRef(null);
+  const pendingThemeSrcRef = useRef(null);
+  const activeThemeSrcRef = useRef(null);
 
   const isAndroidDevice = useMemo(() => {
     if (typeof navigator === 'undefined') return false;
     return /Android/i.test(navigator.userAgent || '');
+  }, []);
+
+  const releaseJumpKey = useCallback(() => {
+    jumpPointerIdRef.current = null;
+    window.__catVirtualKeys?.releaseKey('KeyW');
+  }, []);
+
+  const tryResumeThemeAudio = useCallback(() => {
+    const themeSrc = pendingThemeSrcRef.current;
+    const audio = themeAudioRef.current;
+    if (!themeSrc || !audio) return;
+
+    if (activeThemeSrcRef.current !== themeSrc) {
+      audio.src = themeSrc;
+      audio.currentTime = 0;
+      activeThemeSrcRef.current = themeSrc;
+    }
+
+    audio.play()
+      .then(() => {
+        pendingThemeSrcRef.current = null;
+        setMusicBlocked(false);
+      })
+      .catch(() => {
+        setMusicBlocked(true);
+      });
+  }, []);
+
+  const setThemeAudio = useCallback((themeSrc) => {
+    if (!themeSrc && !themeAudioRef.current) return;
+
+    const audio = themeAudioRef.current || new Audio();
+    if (!themeAudioRef.current) {
+      audio.loop = true;
+      audio.volume = 0.28;
+      audio.preload = 'auto';
+      themeAudioRef.current = audio;
+    }
+
+    if (!themeSrc) {
+      pendingThemeSrcRef.current = null;
+      activeThemeSrcRef.current = null;
+      setMusicBlocked(false);
+      audio.pause();
+      audio.currentTime = 0;
+      return;
+    }
+
+    pendingThemeSrcRef.current = themeSrc;
+    if (activeThemeSrcRef.current !== themeSrc) {
+      audio.src = themeSrc;
+      audio.currentTime = 0;
+      activeThemeSrcRef.current = themeSrc;
+    }
+
+    audio.play()
+      .then(() => {
+        pendingThemeSrcRef.current = null;
+        setMusicBlocked(false);
+      })
+      .catch(() => {
+        setMusicBlocked(true);
+      });
   }, []);
 
   const withBackground = (content) => (
@@ -244,6 +326,7 @@ const App = () => {
   }, [syncHorizontalMoveKeys]);
 
   const stopJoystick = useCallback(() => {
+    joystickPointerIdRef.current = null;
     joystickActiveRef.current = false;
     setJoystickOffset({ x: 0, y: 0 });
     releaseHorizontalMoveKeys();
@@ -251,7 +334,10 @@ const App = () => {
 
   const handleJoystickDown = useCallback((event) => {
     if (!isAndroidDevice) return;
+    if (joystickPointerIdRef.current !== null) return;
     event.preventDefault();
+    event.stopPropagation();
+    joystickPointerIdRef.current = event.pointerId;
     joystickActiveRef.current = true;
     event.currentTarget.setPointerCapture?.(event.pointerId);
     updateJoystickFromPointer(event);
@@ -259,39 +345,63 @@ const App = () => {
 
   const handleJoystickMove = useCallback((event) => {
     if (!joystickActiveRef.current) return;
+    if (event.pointerId !== joystickPointerIdRef.current) return;
     event.preventDefault();
+    event.stopPropagation();
     updateJoystickFromPointer(event);
   }, [updateJoystickFromPointer]);
 
   const handleJoystickUp = useCallback((event) => {
     if (!joystickActiveRef.current) return;
+    if (event.pointerId !== joystickPointerIdRef.current) return;
     event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
     stopJoystick();
   }, [stopJoystick]);
 
   const handleMobileJumpDown = useCallback((event) => {
+    if (!isAndroidDevice) return;
+    if (jumpPointerIdRef.current !== null) return;
     event.preventDefault();
+    event.stopPropagation();
+    jumpPointerIdRef.current = event.pointerId;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
     window.__catVirtualKeys?.pressKey('KeyW');
-  }, []);
+  }, [isAndroidDevice]);
 
   const handleMobileJumpUp = useCallback((event) => {
+    if (jumpPointerIdRef.current === null) return;
+    if (event.pointerId !== jumpPointerIdRef.current) return;
     event.preventDefault();
-    window.__catVirtualKeys?.releaseKey('KeyW');
-  }, []);
+    event.stopPropagation();
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    releaseJumpKey();
+  }, [releaseJumpKey]);
 
   const handleMobileSit = useCallback((event) => {
     event.preventDefault();
+    event.stopPropagation();
     window.__catSitToggle?.();
   }, []);
 
   const handleMobileChat = useCallback((event) => {
     event.preventDefault();
+    event.stopPropagation();
     setChatOpen((prev) => {
       const next = !prev;
       if (!next) setChatText('');
       return next;
     });
   }, []);
+
+  const handleJoystickCaptureLost = useCallback(() => {
+    stopJoystick();
+  }, [stopJoystick]);
+
+  const handleMobileJumpCaptureLost = useCallback(() => {
+    releaseJumpKey();
+  }, [releaseJumpKey]);
 
   const copyRoomLink = useCallback(async () => {
     const url = new URL(window.location.href);
@@ -346,6 +456,52 @@ const App = () => {
   useEffect(() => {
     userRef.current = user;
   }, [user]);
+
+  useEffect(() => {
+    if (screen === SCREEN.EDITOR) {
+      setThemeAudio(THEME_TRACKS.editor);
+      return;
+    }
+
+    if (screen === SCREEN.ROOM) {
+      setThemeAudio(THEME_TRACKS.room);
+      return;
+    }
+
+    setThemeAudio(null);
+  }, [screen, setThemeAudio]);
+
+  useEffect(() => {
+    const unlockAudio = () => {
+      tryResumeThemeAudio();
+    };
+
+    window.addEventListener('click', unlockAudio, { passive: true });
+    window.addEventListener('mousedown', unlockAudio, { passive: true });
+    window.addEventListener('touchstart', unlockAudio, { passive: true });
+    window.addEventListener('pointerdown', unlockAudio, { passive: true });
+    window.addEventListener('keydown', unlockAudio);
+
+    return () => {
+      window.removeEventListener('click', unlockAudio);
+      window.removeEventListener('mousedown', unlockAudio);
+      window.removeEventListener('touchstart', unlockAudio);
+      window.removeEventListener('pointerdown', unlockAudio);
+      window.removeEventListener('keydown', unlockAudio);
+    };
+  }, [tryResumeThemeAudio]);
+
+  useEffect(() => {
+    return () => {
+      const audio = themeAudioRef.current;
+      if (!audio) return;
+      audio.pause();
+      audio.src = '';
+      themeAudioRef.current = null;
+      pendingThemeSrcRef.current = null;
+      activeThemeSrcRef.current = null;
+    };
+  }, []);
 
   const loadUserData = useCallback(async (sessionUser, options = {}) => {
     const { showLoading = true } = options;
@@ -557,10 +713,36 @@ const App = () => {
         const localPresence = localPresenceRef.current;
         if (!channel || !localPresence) return;
 
-        channel.track({
+        const nextPresence = {
           ...localPresence,
           ...state,
+        };
+        localPresenceRef.current = nextPresence;
+
+        channel.track({
+          ...nextPresence,
           updatedAt: Date.now(),
+        });
+      },
+      onSceneChanged: (nextScene) => {
+        const title = typeof nextScene?.title === 'string' ? nextScene.title : 'Room';
+        const hint = typeof nextScene?.hint === 'string'
+          ? nextScene.hint
+          : 'Move to room edges and press E near objects.';
+        setSceneInfo({
+          id: typeof nextScene?.id === 'string' ? nextScene.id : DEFAULT_SCENE_ROOM,
+          title,
+          hint,
+        });
+      },
+      onInteract: (payload) => {
+        if (!payload?.message) return;
+        appendChatMessage({
+          id: `world-${Date.now()}`,
+          sender: 'World',
+          message: payload.message,
+          mine: false,
+          at: Date.now(),
         });
       },
     });
@@ -573,7 +755,7 @@ const App = () => {
         gameRef.current = null;
       }
     };
-  }, [screen]);
+  }, [appendChatMessage, screen]);
 
   useEffect(() => {
     if (!gameRef.current || !skinCanvases) return;
@@ -642,17 +824,42 @@ const App = () => {
   }, [chatOpen]);
 
   useEffect(() => {
+    if (!isAndroidDevice) return undefined;
+
+    const releaseMobileInputs = () => {
+      stopJoystick();
+      releaseJumpKey();
+    };
+
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        releaseMobileInputs();
+      }
+    };
+
+    window.addEventListener('blur', releaseMobileInputs);
+    window.addEventListener('pagehide', releaseMobileInputs);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      window.removeEventListener('blur', releaseMobileInputs);
+      window.removeEventListener('pagehide', releaseMobileInputs);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [isAndroidDevice, releaseJumpKey, stopJoystick]);
+
+  useEffect(() => {
     if (screen === SCREEN.ROOM) return;
     stopJoystick();
-    window.__catVirtualKeys?.releaseKey('KeyW');
-  }, [screen, stopJoystick]);
+    releaseJumpKey();
+  }, [screen, releaseJumpKey, stopJoystick]);
 
   useEffect(() => {
     return () => {
       stopJoystick();
-      window.__catVirtualKeys?.releaseKey('KeyW');
+      releaseJumpKey();
     };
-  }, [stopJoystick]);
+  }, [releaseJumpKey, stopJoystick]);
 
   const sendChatMessage = useCallback(async (rawText) => {
     if (!user) return;
@@ -708,6 +915,8 @@ const App = () => {
     const localPresenceKey = `${user.id}:${tabIdRef.current}`;
     localPresenceKeyRef.current = localPresenceKey;
 
+    supabase.realtime.connect();
+
     const channel = supabase.channel(ROOM_CHANNEL, {
       config: {
         presence: { key: localPresenceKey },
@@ -722,24 +931,32 @@ const App = () => {
       x: CONFIG.WIDTH / 2,
       y: CONFIG.FLOOR_Y,
       facingRight: true,
+      sceneRoom: DEFAULT_SCENE_ROOM,
+    };
+
+    const syncPresenceState = () => {
+      const currentState = channel.presenceState();
+      setOnlinePlayers(toPresencePlayers(currentState));
     };
 
     const trackPresence = async () => {
       if (isDisposed || !localPresenceRef.current) return;
       try {
-        await channel.track({
+        const nextPresence = {
           ...localPresenceRef.current,
           updatedAt: Date.now(),
-        });
+        };
+        localPresenceRef.current = nextPresence;
+        await channel.track(nextPresence);
+        syncPresenceState();
       } catch {
         // Ignore transient realtime errors; reconnect handlers will retry.
       }
     };
 
-    channel.on('presence', { event: 'sync' }, () => {
-      const currentState = channel.presenceState();
-      setOnlinePlayers(toPresencePlayers(currentState));
-    });
+    channel.on('presence', { event: 'sync' }, syncPresenceState);
+    channel.on('presence', { event: 'join' }, syncPresenceState);
+    channel.on('presence', { event: 'leave' }, syncPresenceState);
 
     channel.on('broadcast', { event: 'chat' }, (event) => {
       const payload = event?.payload || event || {};
@@ -766,12 +983,13 @@ const App = () => {
 
     channel.subscribe((status) => {
       if (status === 'SUBSCRIBED') {
-        trackPresence();
+        trackPresence().finally(syncPresenceState);
         return;
       }
 
       if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR') {
         supabase.realtime.connect();
+        syncPresenceState();
       }
     });
 
@@ -781,12 +999,12 @@ const App = () => {
       trackPresence();
     };
 
-    window.addEventListener('visibilitychange', refreshRealtime);
+    document.addEventListener('visibilitychange', refreshRealtime);
     window.addEventListener('online', refreshRealtime);
 
     return () => {
       isDisposed = true;
-      window.removeEventListener('visibilitychange', refreshRealtime);
+      document.removeEventListener('visibilitychange', refreshRealtime);
       window.removeEventListener('online', refreshRealtime);
       setOnlinePlayers([]);
       roomChannelRef.current = null;
@@ -896,9 +1114,20 @@ const App = () => {
         topBar={(
           <div style={styles.editorTopBar}>
             <span style={styles.editorTopText}>Signed in as {user?.email}</span>
-            <button type="button" style={styles.ghostBtn} onClick={handleLogout} disabled={busy}>
-              Logout
-            </button>
+            <div style={styles.editorTopActions}>
+              {musicBlocked ? (
+                <button
+                  type="button"
+                  style={styles.secondaryBtn}
+                  onClick={tryResumeThemeAudio}
+                >
+                  Enable music
+                </button>
+              ) : null}
+              <button type="button" style={styles.ghostBtn} onClick={handleLogout} disabled={busy}>
+                Logout
+              </button>
+            </div>
           </div>
         )}
       />
@@ -910,12 +1139,19 @@ const App = () => {
       <div style={styles.roomHeader}>
         <div>
           <h1 style={styles.roomTitle}>Room: {ROOM_NAME}</h1>
+          <p style={styles.sceneTitle}>Zone: {sceneInfo.title}</p>
           <p style={styles.p}>
             You are {catRecord?.name || 'My Cat'} | Online: {onlinePlayers.length}
           </p>
+          <p style={styles.sceneHint}>{sceneInfo.hint}</p>
         </div>
 
         <div style={styles.roomActions}>
+          {musicBlocked ? (
+            <button type="button" style={styles.secondaryBtn} onClick={tryResumeThemeAudio}>
+              Enable music
+            </button>
+          ) : null}
           <button type="button" style={styles.secondaryBtn} onClick={goToEditor}>
             Edit cat
           </button>
@@ -938,6 +1174,8 @@ const App = () => {
           <span style={styles.hint}>Move</span>
           <span style={styles.key}>W</span>
           <span style={styles.hint}>Jump</span>
+          <span style={styles.key}>E</span>
+          <span style={styles.hint}>Interact</span>
           <span style={styles.key}>Ctrl</span>
           <span style={styles.hint}>Sit</span>
           <span style={styles.key}>T</span>
@@ -952,6 +1190,7 @@ const App = () => {
             onPointerUp={handleJoystickUp}
             onPointerCancel={handleJoystickUp}
             onPointerLeave={handleJoystickUp}
+            onLostPointerCapture={handleJoystickCaptureLost}
           >
             <div
               style={{
@@ -969,6 +1208,7 @@ const App = () => {
               onPointerUp={handleMobileJumpUp}
               onPointerCancel={handleMobileJumpUp}
               onPointerLeave={handleMobileJumpUp}
+              onLostPointerCapture={handleMobileJumpCaptureLost}
             >
               ^
             </button>
@@ -1171,6 +1411,18 @@ const styles = {
     color: '#f1f5ff',
     fontSize: '1.45rem',
   },
+  sceneTitle: {
+    margin: '2px 0 2px 0',
+    color: '#9df0d4',
+    fontSize: 13,
+    fontWeight: 700,
+    letterSpacing: '0.03em',
+  },
+  sceneHint: {
+    margin: '2px 0 0 0',
+    fontSize: 12,
+    color: 'rgba(208, 245, 255, 0.78)',
+  },
   roomActions: {
     display: 'flex',
     gap: 8,
@@ -1223,6 +1475,7 @@ const styles = {
     gap: 12,
     touchAction: 'none',
     userSelect: 'none',
+    pointerEvents: 'auto',
   },
   joystickBase: {
     width: 124,
@@ -1235,6 +1488,7 @@ const styles = {
     alignItems: 'center',
     justifyContent: 'center',
     boxShadow: 'inset 0 0 12px rgba(9, 22, 42, 0.42)',
+    opacity: 0.5,
   },
   joystickKnob: {
     width: 54,
@@ -1244,12 +1498,14 @@ const styles = {
     background: 'radial-gradient(circle at 35% 30%, #c9f2ff, #4c9bd8 68%)',
     boxShadow: '0 6px 14px rgba(0, 0, 0, 0.34)',
     transition: 'transform 40ms linear',
+    opacity: 0.92,
   },
   mobileActionStack: {
     display: 'grid',
     gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
     gap: 10,
     width: 'min(280px, calc(100% - 136px))',
+    touchAction: 'manipulation',
   },
   mobileControlBtn: {
     borderRadius: 14,
@@ -1260,6 +1516,9 @@ const styles = {
     fontWeight: 800,
     minHeight: 58,
     touchAction: 'none',
+    userSelect: 'none',
+    WebkitUserSelect: 'none',
+    WebkitTouchCallout: 'none',
   },
   mobileChatBtn: {
     borderRadius: 14,
@@ -1270,6 +1529,9 @@ const styles = {
     fontWeight: 800,
     minHeight: 58,
     touchAction: 'none',
+    userSelect: 'none',
+    WebkitUserSelect: 'none',
+    WebkitTouchCallout: 'none',
   },
   onlineList: {
     maxWidth: 980,
@@ -1354,6 +1616,12 @@ const styles = {
     justifyContent: 'space-between',
     alignItems: 'center',
     gap: 10,
+    flexWrap: 'wrap',
+  },
+  editorTopActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
     flexWrap: 'wrap',
   },
   editorTopText: {

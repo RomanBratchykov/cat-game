@@ -79,7 +79,9 @@ export class DragSystem extends System {
     }
 
     console.log(`[DRAG] Started on ${entity.name}`);
-  if (entity.has(CatComponent)) this._audio?.playMeow();
+    if (entity.has(CatComponent)) {
+      this._audio?.playMeow();
+    }
   }
 
   update() {

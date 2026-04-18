@@ -253,31 +253,50 @@ export class AudioSystem extends System {
     super();
     this._purr  = new Audio('/assets/purr.mp3');
     this._purr.loop   = true;
-    this._purr.volume = 0.4;
+    this._purr.volume = CONFIG.PURR_VOLUME;
     this._purring = false;
 
-    // Meows
-    this._meows = [1,2].map(n => `/assets/meow${n}.mp3`);
-
-    // Background music — стартує після першого дотику
-    this._bg = new Audio('/assets/bg.mp3');
-    this._bg.loop = true; this._bg.volume = 0.1;
-    const startBg = () => {
-      this._bg.play().catch(() => {});
-      window.removeEventListener('pointerdown', startBg);
-    };
-    window.addEventListener('pointerdown', startBg);
+    // Використовуємо весь набір meow-звуків щоб уникнути повторів.
+    this._meows = [1, 2, 3].map((n) => `/assets/meow${n}.mp3`);
+    this._lastMeowAt = 0;
+    this._meowCooldownMs = 320;
   }
 
-  playMeow() {
+  playMeow(volume = 0.72) {
+    const now = Date.now();
+    if (now - this._lastMeowAt < this._meowCooldownMs) return;
+    this._lastMeowAt = now;
+
     const src = this._meows[Math.floor(Math.random() * this._meows.length)];
-    Object.assign(new Audio(src), { volume: 0.7 }).play().catch(() => {});
+    const meow = new Audio(src);
+    meow.volume = volume;
+    meow.play().catch(() => {});
   }
 
-  startPurr() {}
-  stopPurr()  {}
+  startPurr() {
+    if (this._purring) return;
+
+    this._purring = true;
+    this._purr.volume = CONFIG.PURR_VOLUME;
+    this._purr.play().catch(() => {
+      this._purring = false;
+    });
+  }
+
+  stopPurr() {
+    if (!this._purring) return;
+
+    this._purring = false;
+    this._purr.pause();
+    this._purr.currentTime = 0;
+  }
+
   update() {}
-  destroy() { this._purr.pause(); this._bg.pause(); }
+
+  destroy() {
+    this.stopPurr();
+    this._purr.src = '';
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────

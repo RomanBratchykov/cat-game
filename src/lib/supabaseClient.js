@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const AUTH_SLOT_SESSION_KEY = 'cat-auth-slot';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -15,7 +16,19 @@ function getProjectRef(url) {
 
 function getAuthSlot() {
   try {
-    return new URLSearchParams(window.location.search).get('auth')?.trim() || '';
+    const urlSlot = new URLSearchParams(window.location.search).get('auth')?.trim() || '';
+    if (urlSlot) return urlSlot;
+
+    const storedSlot = window.sessionStorage.getItem(AUTH_SLOT_SESSION_KEY) || '';
+    if (storedSlot) return storedSlot;
+
+    const generatedSlot =
+      (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+        ? crypto.randomUUID()
+        : `tab-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+    window.sessionStorage.setItem(AUTH_SLOT_SESSION_KEY, generatedSlot);
+    return generatedSlot;
   } catch {
     return '';
   }

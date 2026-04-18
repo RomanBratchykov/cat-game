@@ -16,7 +16,6 @@ import {
 } from '../systems/systems.js';
 import {
   createCat,
-  createBall,
   InputComponent,
   SpineComponent,
   TransformComponent,
@@ -35,6 +34,127 @@ const CHAT_BUBBLE = {
   offsetY: -210,
 };
 
+const DEFAULT_SCENE_ROOM = 'courtyard';
+const SCENE_EDGE_THRESHOLD_PX = 6;
+const SCENE_TRANSITION_COOLDOWN_MS = 520;
+const INTERACT_DISTANCE_PX = 102;
+
+const SCENE_ROOMS = {
+  courtyard: {
+    id: 'courtyard',
+    title: 'Courtyard',
+    leftTo: 'workshop',
+    rightTo: 'observatory',
+    colors: {
+      sky: 0x17304a,
+      mid: 0x1f4d60,
+      floor: 0x24424d,
+      floorLine: 0x6ea88f,
+    },
+    hint: 'Move to the edge to switch rooms. Press E near objects.',
+    objects: [
+      {
+        id: 'water-bowl',
+        label: 'Water Bowl',
+        xRatio: 0.23,
+        width: 74,
+        height: 26,
+        color: 0x8fd7ff,
+        accent: 0xdff6ff,
+        interactionText: 'Fresh water unlocked. Energy restored.',
+      },
+      {
+        id: 'scratch-post',
+        label: 'Scratch Post',
+        xRatio: 0.73,
+        width: 48,
+        height: 96,
+        color: 0xce9f62,
+        accent: 0xf2d8aa,
+        interactionText: 'Scratch combo! Claws are super sharp now.',
+      },
+    ],
+  },
+  workshop: {
+    id: 'workshop',
+    title: 'Workshop',
+    leftTo: 'observatory',
+    rightTo: 'courtyard',
+    colors: {
+      sky: 0x3d1f3d,
+      mid: 0x4e2c57,
+      floor: 0x4b2f3d,
+      floorLine: 0xf2b56d,
+    },
+    hint: 'This room has craft toys. Press E to interact.',
+    objects: [
+      {
+        id: 'yarn-basket',
+        label: 'Yarn Basket',
+        xRatio: 0.28,
+        width: 88,
+        height: 48,
+        color: 0xe88fc7,
+        accent: 0xffdaef,
+        interactionText: 'Yarn mission started. Roll speed increased.',
+      },
+      {
+        id: 'nap-pillow',
+        label: 'Nap Pillow',
+        xRatio: 0.7,
+        width: 102,
+        height: 30,
+        color: 0x8f96d6,
+        accent: 0xe1e5ff,
+        interactionText: 'Soft nap complete. Mood meter is full.',
+      },
+    ],
+  },
+  observatory: {
+    id: 'observatory',
+    title: 'Observatory',
+    leftTo: 'courtyard',
+    rightTo: 'workshop',
+    colors: {
+      sky: 0x111a3f,
+      mid: 0x233572,
+      floor: 0x1f3159,
+      floorLine: 0x9ac0ff,
+    },
+    hint: 'Watch stars and test gadgets. Press E to interact.',
+    objects: [
+      {
+        id: 'telescope',
+        label: 'Telescope',
+        xRatio: 0.24,
+        width: 76,
+        height: 70,
+        color: 0x90a9ff,
+        accent: 0xe5eeff,
+        interactionText: 'Star trail discovered. New route marked.',
+      },
+      {
+        id: 'radio-console',
+        label: 'Radio Console',
+        xRatio: 0.72,
+        width: 96,
+        height: 54,
+        color: 0x6fcad4,
+        accent: 0xd9fafd,
+        interactionText: 'Beacon online. Teammates can find you faster.',
+      },
+    ],
+  },
+};
+
+function getSceneRoom(roomId) {
+  if (typeof roomId === 'string' && SCENE_ROOMS[roomId]) {
+    return SCENE_ROOMS[roomId];
+  }
+
+  return SCENE_ROOMS[DEFAULT_SCENE_ROOM];
+}
+
 export class Game {
   constructor(canvas, options = {}) {
     console.log('[Game] Initializing...');
@@ -51,6 +171,12 @@ export class Game {
     this._onLocalState = typeof options.onLocalState === 'function'
       ? options.onLocalState
       : null;
+    this._onSceneChanged = typeof options.onSceneChanged === 'function'
+      ? options.onSceneChanged
+      : null;
+    this._onInteract = typeof options.onInteract === 'function'
+      ? options.onInteract
+      : null;
     this._emitStateEveryMs = 120;
     this._emitStateClock = 0;
     this._remotePlayers = new Map();
@@ -59,6 +185,11 @@ export class Game {
     this._chatBubbles = new Map();
     this._chatTimers = new Map();
     this._skeletonData = null;
+    this._sceneRoomId = DEFAULT_SCENE_ROOM;
+    this._sceneObjects = [];
+    this._lastSceneTransitionAt = 0;
+    this._interactConsumed = false;
+    this._sceneObjectLayer = null;
 
     this._app = new PIXI.Application({
       width:           CONFIG.WIDTH,
@@ -77,6 +208,11 @@ export class Game {
 
     this._drawBackground();
 
+    this._sceneObjectLayer = new PIXI.Container();
+    this._app.stage.addChild(this._sceneObjectLayer);
+    this._renderSceneObjects();
+    this._emitSceneChanged();
+
     window.addEventListener('resize', this._onResize);
     if (typeof ResizeObserver !== 'undefined' && this._canvas?.parentElement) {
       this._resizeObserver = new ResizeObserver(this._onResize);
@@ -85,6 +221,7 @@ export class Game {
 
     const audioSystem = new AudioSystem();
     const inputSystem = new InputSystem();
+    this._inputSystem = inputSystem;
     const dragSystem  = new DragSystem(this._app, audioSystem);
     const petSystem   = new PetSystem(this._app, audioSystem);
     this._customSkin  = new CustomSkinSystem(this._app);
@@ -112,14 +249,14 @@ export class Game {
         this._catEntity = createCat(this._app, this._skeletonData, dragSystem, petSystem);
         this._world.addEntity(this._catEntity);
 
-        const ball = createBall(this._app, dragSystem, CONFIG.WIDTH * 0.7, CONFIG.FLOOR_Y - 20);
-        this._world.addEntity(ball);
-
         this._app.ticker.add((delta) => {
           this._world.tick(delta);
+          this._updateSceneFlow();
           this._tickLocalState();
         });
         console.log('[Game] Ready!');
+
+        this._setSceneRoom(this._sceneRoomId, { force: true, entrySide: 'center' });
 
         // Застосовуємо відкладений скін якщо є
         if (this._pendingSkin) {
@@ -154,6 +291,7 @@ export class Game {
     setViewportSize(viewport.width, viewport.height);
     this._app.renderer.resize(CONFIG.WIDTH, CONFIG.HEIGHT);
     this._drawBackground();
+    this._renderSceneObjects();
   }
 
   // parts: { head?: HTMLCanvasElement, body?: ..., leg?: ..., tail?: ... }
@@ -232,6 +370,167 @@ export class Game {
 
   addEntity(entity) { return this._world.addEntity(entity); }
 
+  _emitSceneChanged() {
+    if (!this._onSceneChanged) return;
+
+    const scene = getSceneRoom(this._sceneRoomId);
+    this._onSceneChanged({
+      id: scene.id,
+      title: scene.title,
+      hint: scene.hint,
+      leftTo: scene.leftTo,
+      rightTo: scene.rightTo,
+    });
+  }
+
+  _setSceneRoom(nextRoomId, options = {}) {
+    const { force = false, entrySide = 'center' } = options;
+    const nextScene = getSceneRoom(nextRoomId);
+
+    if (!force && this._sceneRoomId === nextScene.id) return;
+
+    this._sceneRoomId = nextScene.id;
+    this._lastSceneTransitionAt = Date.now();
+    this._drawBackground();
+    this._renderSceneObjects();
+    this._refreshRemoteVisibility();
+    this._emitSceneChanged();
+
+    if (!this._catEntity) return;
+
+    const tf = this._catEntity.get(TransformComponent);
+    if (!tf) return;
+
+    if (entrySide === 'left') {
+      tf.x = 54;
+    } else if (entrySide === 'right') {
+      tf.x = CONFIG.WIDTH - 54;
+    } else {
+      tf.x = Math.min(CONFIG.WIDTH - 54, Math.max(54, tf.x));
+    }
+  }
+
+  _renderSceneObjects() {
+    if (!this._sceneObjectLayer) return;
+
+    const previousChildren = this._sceneObjectLayer.removeChildren();
+    previousChildren.forEach((child) => {
+      child.destroy({ children: true, texture: false, baseTexture: false });
+    });
+
+    const scene = getSceneRoom(this._sceneRoomId);
+    this._sceneObjects = scene.objects.map((item) => {
+      const x = Math.round(CONFIG.WIDTH * item.xRatio);
+      const y = CONFIG.FLOOR_Y;
+
+      const container = new PIXI.Container();
+      container.x = x;
+      container.y = y;
+
+      const body = new PIXI.Graphics();
+      body.beginFill(item.color, 0.95);
+      body.drawRoundedRect(-item.width / 2, -item.height, item.width, item.height, 12);
+      body.endFill();
+      body.lineStyle(2, item.accent, 0.95);
+      body.drawRoundedRect(-item.width / 2, -item.height, item.width, item.height, 12);
+
+      const shine = new PIXI.Graphics();
+      shine.beginFill(item.accent, 0.22);
+      shine.drawRoundedRect(-item.width / 2 + 6, -item.height + 5, item.width - 12, Math.max(10, item.height * 0.33), 8);
+      shine.endFill();
+
+      const label = new PIXI.Text(item.label, {
+        fill: '#e8f4ff',
+        fontFamily: 'purrabet-regular',
+        fontSize: 12,
+        stroke: '#10213a',
+        strokeThickness: 3,
+      });
+      label.anchor.set(0.5, 1);
+      label.y = -item.height - 4;
+
+      container.addChild(body);
+      container.addChild(shine);
+      container.addChild(label);
+      this._sceneObjectLayer.addChild(container);
+
+      return {
+        id: item.id,
+        label: item.label,
+        interactionText: item.interactionText,
+        x,
+        y: y - item.height / 2,
+        width: item.width,
+        height: item.height,
+      };
+    });
+  }
+
+  _findNearbyInteractable(tf) {
+    let best = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (const item of this._sceneObjects) {
+      const dx = item.x - tf.x;
+      const dy = item.y - tf.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance > INTERACT_DISTANCE_PX || distance >= bestDistance) continue;
+      best = item;
+      bestDistance = distance;
+    }
+
+    return best;
+  }
+
+  _updateSceneFlow() {
+    if (!this._catEntity || !this._inputSystem) return;
+
+    const tf = this._catEntity.get(TransformComponent);
+    if (!tf) return;
+
+    const scene = getSceneRoom(this._sceneRoomId);
+    const now = Date.now();
+    const canTransition = now - this._lastSceneTransitionAt > SCENE_TRANSITION_COOLDOWN_MS;
+
+    if (canTransition) {
+      if (scene.leftTo && tf.x <= SCENE_EDGE_THRESHOLD_PX && this._inputSystem.isLeft()) {
+        this._setSceneRoom(scene.leftTo, { entrySide: 'right' });
+        return;
+      }
+
+      if (scene.rightTo && tf.x >= CONFIG.WIDTH - SCENE_EDGE_THRESHOLD_PX && this._inputSystem.isRight()) {
+        this._setSceneRoom(scene.rightTo, { entrySide: 'left' });
+        return;
+      }
+    }
+
+    const nearby = this._findNearbyInteractable(tf);
+    const interactPressed = this._inputSystem.isDown('KeyE');
+
+    if (!interactPressed) {
+      this._interactConsumed = false;
+    }
+
+    if (!nearby || !interactPressed || this._interactConsumed) return;
+
+    this._interactConsumed = true;
+    this.setLocalChatBubble(nearby.interactionText);
+    if (this._onInteract) {
+      this._onInteract({
+        roomId: this._sceneRoomId,
+        objectId: nearby.id,
+        label: nearby.label,
+        message: nearby.interactionText,
+      });
+    }
+  }
+
+  _refreshRemoteVisibility() {
+    for (const entry of this._remotePlayers.values()) {
+      entry.container.visible = (entry.sceneRoom || DEFAULT_SCENE_ROOM) === this._sceneRoomId;
+    }
+  }
+
   _tickLocalState() {
     if (!this._onLocalState || !this._catEntity) return;
 
@@ -248,6 +547,7 @@ export class Game {
       x: Number(tf.x.toFixed(2)),
       y: Number(tf.y.toFixed(2)),
       facingRight: input?.facingRight !== false,
+      sceneRoom: this._sceneRoomId,
     });
   }
 
@@ -281,6 +581,7 @@ export class Game {
       label,
       baseScale,
       currentAnim: CONFIG.ANIM.STAND,
+      sceneRoom: typeof player?.sceneRoom === 'string' ? player.sceneRoom : DEFAULT_SCENE_ROOM,
       lastX: Number.isFinite(player?.x) ? player.x : CONFIG.WIDTH / 2,
       lastY: Number.isFinite(player?.y) ? player.y : CONFIG.FLOOR_Y,
     };
@@ -364,6 +665,9 @@ export class Game {
     const nextX = Number.isFinite(player?.x) ? player.x : entry.lastX;
     const nextY = Number.isFinite(player?.y) ? player.y : entry.lastY;
     const facingRight = player?.facingRight !== false;
+    const sceneRoom = typeof player?.sceneRoom === 'string' ? player.sceneRoom : DEFAULT_SCENE_ROOM;
+    entry.sceneRoom = sceneRoom;
+    entry.container.visible = sceneRoom === this._sceneRoomId;
 
     const moved = Math.abs(nextX - entry.lastX) > 0.6 || Math.abs(nextY - entry.lastY) > 0.6;
     const wantedAnim = moved ? CONFIG.ANIM.WALK : CONFIG.ANIM.STAND;
@@ -390,6 +694,8 @@ export class Game {
   }
 
   _drawBackground() {
+    const scene = getSceneRoom(this._sceneRoomId);
+
     if (!this._bg) {
       this._bg = new PIXI.Graphics();
       this._app.stage.addChild(this._bg);
@@ -401,14 +707,20 @@ export class Game {
     }
 
     this._bg.clear();
-    this._bg.beginFill(CONFIG.BG_COLOR);
-    this._bg.drawRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+    this._bg.beginFill(scene.colors.sky);
+    this._bg.drawRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT * 0.58);
+    this._bg.endFill();
+    this._bg.beginFill(scene.colors.mid);
+    this._bg.drawRect(0, CONFIG.HEIGHT * 0.58, CONFIG.WIDTH, CONFIG.HEIGHT * 0.42);
     this._bg.endFill();
 
     this._floor.clear();
-    this._floor.beginFill(0x16213e);
+    this._floor.beginFill(scene.colors.floor);
     this._floor.drawRect(0, CONFIG.FLOOR_Y, CONFIG.WIDTH, CONFIG.HEIGHT - CONFIG.FLOOR_Y);
     this._floor.endFill();
+    this._floor.lineStyle(2, scene.colors.floorLine, 0.85);
+    this._floor.moveTo(0, CONFIG.FLOOR_Y + 1);
+    this._floor.lineTo(CONFIG.WIDTH, CONFIG.FLOOR_Y + 1);
   }
 
   destroy() {
