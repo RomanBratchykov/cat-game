@@ -16,10 +16,8 @@ const SCREEN = {
 
 const CHAT_MAX_LENGTH = 120;
 const CHAT_POOL_LIMIT = 40;
-const TAB_LOCK_KEY = 'cat-game.active-tab.v1';
-const TAB_LOCK_TTL_MS = 6000;
-const TAB_LOCK_HEARTBEAT_MS = 2000;
 const PRESENCE_STALE_AFTER_MS = 15000;
+const LOAD_DATA_TIMEOUT_MS = 16000;
 
 const ROOM_NAME =
   new URLSearchParams(window.location.search).get('room') ||
@@ -34,38 +32,6 @@ function createTabId() {
     return crypto.randomUUID();
   }
   return `tab-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function readTabLock() {
-  try {
-    const raw = localStorage.getItem(TAB_LOCK_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function writeTabLock(lock) {
-  try {
-    localStorage.setItem(TAB_LOCK_KEY, JSON.stringify(lock));
-  } catch {
-    // Ignore storage errors.
-  }
-}
-
-function clearTabLockIfOwned(userId, tabId) {
-  const lock = readTabLock();
-  if (!lock) return;
-  if (lock.userId !== userId || lock.tabId !== tabId) return;
-
-  try {
-    localStorage.removeItem(TAB_LOCK_KEY);
-  } catch {
-    // Ignore storage errors.
-  }
 }
 
 function seededUnit(index, seed) {
@@ -130,9 +96,23 @@ function sanitizeError(error, fallback = 'Unexpected error') {
   return error?.message || fallback;
 }
 
-function isAuthLockError(error) {
-  const message = String(error?.message || '');
-  return message.includes('lock:sb-') && message.includes('stole it');
+function withTimeout(promise, timeoutMs, message) {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      reject(new Error(message));
+    }, timeoutMs);
+
+    Promise.resolve(promise).then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
 }
 
 function toPresencePlayers(presenceState) {
@@ -180,7 +160,6 @@ const App = () => {
   const [chatOpen, setChatOpen] = useState(false);
   const [chatText, setChatText] = useState('');
   const [chatMessages, setChatMessages] = useState([]);
-  const [tabBlocked, setTabBlocked] = useState(false);
   const [roomLinkCopied, setRoomLinkCopied] = useState(false);
 
   const canvasRef = useRef(null);
@@ -191,6 +170,9 @@ const App = () => {
   const chatInputRef = useRef(null);
   const tabIdRef = useRef(createTabId());
   const roomLinkResetTimerRef = useRef(null);
+  const screenRef = useRef(SCREEN.LOADING);
+  const userRef = useRef(null);
+  const lastLoadedUserRef = useRef(null);
 
   const withBackground = (content) => (
     <div className="app-bg-shell">
@@ -252,25 +234,53 @@ const App = () => {
     };
   }, []);
 
-  const loadUserData = useCallback(async (sessionUser) => {
-    setScreen(SCREEN.LOADING);
+  useEffect(() => {
+    screenRef.current = screen;
+  }, [screen]);
+
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
+
+  const loadUserData = useCallback(async (sessionUser, options = {}) => {
+    const { showLoading = true } = options;
+
+    if (showLoading) {
+      setScreen(SCREEN.LOADING);
+    }
     setErrorText('');
 
-    await ensureProfile(sessionUser);
+    await withTimeout(
+      ensureProfile(sessionUser),
+      LOAD_DATA_TIMEOUT_MS,
+      'Profile request timed out. Please try again.'
+    );
 
-    const cat = await getMyCat(sessionUser.id);
+    const cat = await withTimeout(
+      getMyCat(sessionUser.id),
+      LOAD_DATA_TIMEOUT_MS,
+      'Cat data request timed out. Please try again.'
+    );
+
     setCatRecord(cat);
     setEditorInitial(catRecordToEditorInitial(cat));
 
     if (!cat) {
       setSkinCanvases(null);
       setScreen(SCREEN.EDITOR);
+      lastLoadedUserRef.current = sessionUser.id;
       return;
     }
 
-    const loadedCanvases = await dataUrlsToCanvases(cat.skin_parts || {});
+    const loadedCanvases = await withTimeout(
+      dataUrlsToCanvases(cat.skin_parts || {}),
+      LOAD_DATA_TIMEOUT_MS,
+      'Skin image loading timed out. Please re-open the editor.'
+    );
+
     setSkinCanvases(loadedCanvases);
     setScreen(SCREEN.ROOM);
+    lastLoadedUserRef.current = sessionUser.id;
   }, []);
 
   useEffect(() => {
@@ -290,6 +300,7 @@ const App = () => {
         const currentUser = data.session?.user ?? null;
         if (!isActive) return;
 
+        userRef.current = currentUser;
         setUser(currentUser);
 
         if (!currentUser) {
@@ -297,15 +308,9 @@ const App = () => {
           return;
         }
 
-        await loadUserData(currentUser);
+        await loadUserData(currentUser, { showLoading: true });
       } catch (error) {
         if (!isActive) return;
-
-        if (isAuthLockError(error)) {
-          setScreen(SCREEN.AUTH);
-          setErrorText('Session is locked by another tab. Use different URLs like ?auth=a and ?auth=b to test two accounts on one device.');
-          return;
-        }
 
         setScreen(SCREEN.ERROR);
         setErrorText(sanitizeError(error, 'Failed to initialize session.'));
@@ -317,8 +322,10 @@ const App = () => {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, session) => {
+      const previousUserId = userRef.current?.id ?? null;
       const sessionUser = session?.user ?? null;
 
+      userRef.current = sessionUser;
       setUser(sessionUser);
       setAuthNotice('');
 
@@ -327,6 +334,7 @@ const App = () => {
         setCatRecord(null);
         setEditorInitial(null);
         setSkinCanvases(null);
+        lastLoadedUserRef.current = null;
         setScreen(SCREEN.AUTH);
         return;
       }
@@ -335,8 +343,15 @@ const App = () => {
         return;
       }
 
+      const sameUser = previousUserId === sessionUser.id;
+      const alreadyLoaded = lastLoadedUserRef.current === sessionUser.id;
+      if (event === 'SIGNED_IN' && sameUser && alreadyLoaded && screenRef.current !== SCREEN.AUTH) {
+        return;
+      }
+
       try {
-        await loadUserData(sessionUser);
+        const shouldShowLoading = screenRef.current === SCREEN.AUTH || !alreadyLoaded;
+        await loadUserData(sessionUser, { showLoading: shouldShowLoading });
       } catch (error) {
         setScreen(SCREEN.ERROR);
         setErrorText(sanitizeError(error, 'Failed to load profile data.'));
@@ -428,7 +443,7 @@ const App = () => {
   };
 
   useEffect(() => {
-    if (screen !== SCREEN.ROOM || tabBlocked) return undefined;
+    if (screen !== SCREEN.ROOM) return undefined;
     if (!canvasRef.current) return undefined;
 
     const game = new Game(canvasRef.current, {
@@ -453,7 +468,7 @@ const App = () => {
         gameRef.current = null;
       }
     };
-  }, [screen, tabBlocked]);
+  }, [screen]);
 
   useEffect(() => {
     if (!gameRef.current || !skinCanvases) return;
@@ -464,57 +479,6 @@ const App = () => {
     if (!user) return [];
     return onlinePlayers.filter((player) => player.presenceKey !== localPresenceKeyRef.current);
   }, [onlinePlayers, user]);
-
-  useEffect(() => {
-    if (screen !== SCREEN.ROOM || !user) {
-      setTabBlocked(false);
-      return undefined;
-    }
-
-    const tabId = tabIdRef.current;
-
-    const evaluateLock = () => {
-      const now = Date.now();
-      const lock = readTabLock();
-      const lockIsFresh = lock && Number.isFinite(lock.updatedAt) && (now - lock.updatedAt) < TAB_LOCK_TTL_MS;
-
-      if (lockIsFresh && lock.userId === user.id && lock.tabId !== tabId) {
-        setTabBlocked(true);
-        return false;
-      }
-
-      setTabBlocked(false);
-      writeTabLock({ userId: user.id, tabId, updatedAt: now });
-      return true;
-    };
-
-    evaluateLock();
-
-    const timer = setInterval(() => {
-      evaluateLock();
-    }, TAB_LOCK_HEARTBEAT_MS);
-
-    const onStorage = (event) => {
-      if (event.key !== TAB_LOCK_KEY) return;
-      evaluateLock();
-    };
-
-    const onPageHide = () => {
-      clearTabLockIfOwned(user.id, tabId);
-    };
-
-    window.addEventListener('storage', onStorage);
-    window.addEventListener('pagehide', onPageHide);
-    window.addEventListener('beforeunload', onPageHide);
-
-    return () => {
-      clearInterval(timer);
-      window.removeEventListener('storage', onStorage);
-      window.removeEventListener('pagehide', onPageHide);
-      window.removeEventListener('beforeunload', onPageHide);
-      clearTabLockIfOwned(user.id, tabId);
-    };
-  }, [screen, user]);
 
   useEffect(() => {
     if (!gameRef.current) return;
@@ -618,7 +582,9 @@ const App = () => {
   };
 
   useEffect(() => {
-    if (!supabase || screen !== SCREEN.ROOM || !user || tabBlocked) return undefined;
+    if (!supabase || screen !== SCREEN.ROOM || !user) return undefined;
+
+    let isDisposed = false;
 
     const localName = catRecord?.name || user.email?.split('@')?.[0] || 'Cat player';
     const localPresenceKey = `${user.id}:${tabIdRef.current}`;
@@ -638,6 +604,18 @@ const App = () => {
       x: CONFIG.WIDTH / 2,
       y: CONFIG.FLOOR_Y,
       facingRight: true,
+    };
+
+    const trackPresence = async () => {
+      if (isDisposed || !localPresenceRef.current) return;
+      try {
+        await channel.track({
+          ...localPresenceRef.current,
+          updatedAt: Date.now(),
+        });
+      } catch {
+        // Ignore transient realtime errors; reconnect handlers will retry.
+      }
     };
 
     channel.on('presence', { event: 'sync' }, () => {
@@ -668,23 +646,37 @@ const App = () => {
       gameRef.current?.setRemoteChatBubble(bubbleId, message);
     });
 
-    channel.subscribe(async (status) => {
-      if (status !== 'SUBSCRIBED') return;
+    channel.subscribe((status) => {
+      if (status === 'SUBSCRIBED') {
+        trackPresence();
+        return;
+      }
 
-      await channel.track({
-        ...localPresenceRef.current,
-        updatedAt: Date.now(),
-      });
+      if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR') {
+        supabase.realtime.connect();
+      }
     });
 
+    const refreshRealtime = () => {
+      if (document.hidden) return;
+      supabase.realtime.connect();
+      trackPresence();
+    };
+
+    window.addEventListener('visibilitychange', refreshRealtime);
+    window.addEventListener('online', refreshRealtime);
+
     return () => {
+      isDisposed = true;
+      window.removeEventListener('visibilitychange', refreshRealtime);
+      window.removeEventListener('online', refreshRealtime);
       setOnlinePlayers([]);
       roomChannelRef.current = null;
       localPresenceRef.current = null;
       localPresenceKeyRef.current = '';
       supabase.removeChannel(channel);
     };
-  }, [screen, user, catRecord?.name, appendChatMessage, tabBlocked]);
+  }, [screen, user, catRecord?.name, appendChatMessage]);
 
   useEffect(() => {
     if (screen === SCREEN.ROOM) return;
@@ -832,13 +824,6 @@ const App = () => {
         <span style={styles.key}>T</span>
         <span style={styles.hint}>Chat</span>
       </div>
-
-      {tabBlocked ? (
-        <div style={styles.tabBlockedCard}>
-          <strong>This game is active in another tab.</strong>
-          <span style={styles.tabBlockedText}>Keep that tab open for gameplay. This tab is read-only to avoid reboot loops.</span>
-        </div>
-      ) : null}
 
       {chatOpen ? (
         <form style={styles.chatForm} onSubmit={handleChatSubmit}>
@@ -1093,23 +1078,6 @@ const styles = {
     background: 'rgba(6, 16, 26, 0.9)',
     color: '#dff6ff',
     fontSize: 14,
-  },
-  tabBlockedCard: {
-    maxWidth: 980,
-    width: '100%',
-    margin: '0 auto',
-    borderRadius: 10,
-    border: '1px solid rgba(255, 216, 170, 0.35)',
-    background: 'rgba(66, 42, 14, 0.35)',
-    color: '#ffe7c7',
-    padding: '10px 12px',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 4,
-  },
-  tabBlockedText: {
-    fontSize: 12,
-    opacity: 0.9,
   },
   chatPool: {
     maxWidth: 980,

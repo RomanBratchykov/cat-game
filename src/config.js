@@ -5,12 +5,16 @@
 // Якщо хочеш підкрутити гравітацію або швидкість — тільки тут.
 // ─────────────────────────────────────────────────────────────────
 
+const BASE_WIDTH = 800;
+const BASE_HEIGHT = 500;
+const FLOOR_RATIO = 0.88;
+
 export const CONFIG = {
   // ── Canvas ────────────────────────────────────────────────────
-  WIDTH:    800,
-  HEIGHT:   500,
+  WIDTH:    BASE_WIDTH,
+  HEIGHT:   BASE_HEIGHT,
   BG_COLOR: 0x1a1a2e,
-  FLOOR_Y:  440,
+  FLOOR_Y:  Math.round(BASE_HEIGHT * FLOOR_RATIO),
 
   // ── Cat movement ─────────────────────────────────────────────
   MOVE_SPEED:          3,
@@ -50,3 +54,12 @@ export const CONFIG = {
     PET:   'sitpet',
   },
 };
+
+export function setViewportSize(width, height) {
+  const nextWidth = Math.max(640, Math.round(Number(width) || BASE_WIDTH));
+  const nextHeight = Math.max(400, Math.round(Number(height) || BASE_HEIGHT));
+
+  CONFIG.WIDTH = nextWidth;
+  CONFIG.HEIGHT = nextHeight;
+  CONFIG.FLOOR_Y = Math.round(nextHeight * FLOOR_RATIO);
+}

@@ -1,7 +1,7 @@
 @font-face {
   font-family: 'purrabet-regular';
   src: url('/assets/fonts/Purrabet-Regular.ttf') format('truetype');
-  font-display: swap;
+  font-display: block;
 }
 
 :root {

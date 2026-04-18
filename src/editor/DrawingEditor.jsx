@@ -16,69 +16,18 @@ const PART_LABELS = {
   tail: 'Tail',
 };
 
-const FUR_PRESETS = [
-  {
-    name: 'Ginger',
-    fur: '#d89b55',
-    belly: '#f7e8cc',
-    pattern: '#9b6231',
-    eye: '#58b7ff',
-    ear: '#f9b5bf',
-  },
-  {
-    name: 'Smoky',
-    fur: '#8b8c98',
-    belly: '#d8dbe3',
-    pattern: '#5f6471',
-    eye: '#8af0d8',
-    ear: '#ffc5d0',
-  },
-  {
-    name: 'Midnight',
-    fur: '#2e3342',
-    belly: '#6f7686',
-    pattern: '#1c2230',
-    eye: '#d5ff7a',
-    ear: '#ff8ea9',
-  },
-  {
-    name: 'Latte',
-    fur: '#c9ae8b',
-    belly: '#f4e8d8',
-    pattern: '#9f7f59',
-    eye: '#6fddff',
-    ear: '#f4b0b8',
-  },
-];
-
-const PATTERN_OPTIONS = [
-  { value: 'none', label: 'None' },
-  { value: 'stripes', label: 'Stripes' },
-  { value: 'spots', label: 'Spots' },
-];
-
-const EYE_OPTIONS = [
-  { value: 'round', label: 'Round' },
-  { value: 'sleepy', label: 'Sleepy' },
-  { value: 'big', label: 'Big' },
-];
-
 const DEFAULT_KITTEN = {
-  name: 'Mochi',
-  furColor: FUR_PRESETS[0].fur,
-  bellyColor: FUR_PRESETS[0].belly,
-  patternColor: FUR_PRESETS[0].pattern,
-  eyeColor: FUR_PRESETS[0].eye,
-  earColor: FUR_PRESETS[0].ear,
-  patternType: 'stripes',
-  eyeStyle: 'round',
-  hasSocks: true,
-  hasTailTip: true,
+  name: 'My Cat',
 };
 
-const STORAGE_KEY_KITTEN = 'catGame.kittenBuilder.v1';
-const STORAGE_KEY_PART_LIBRARY = 'catGame.kittenPartLibrary.v1';
-const STORAGE_KEY_SELECTED_PARTS = 'catGame.kittenSelectedParts.v1';
+const STORAGE_KEY_KITTEN = 'catGame.kittenBuilder.v2';
+const STORAGE_KEY_PART_LIBRARY = 'catGame.kittenPartLibrary.v2';
+const STORAGE_KEY_SELECTED_PARTS = 'catGame.kittenSelectedParts.v2';
+
+const DEFAULT_PART_IMAGE_MODULES = import.meta.glob('../assets/Pngs/*.{png,jpg,jpeg,webp}', {
+  eager: true,
+  import: 'default',
+});
 
 function createEmptyPartLibrary() {
   return {
@@ -96,6 +45,76 @@ function createEmptySelectedParts() {
     leg: null,
     tail: null,
   };
+}
+
+function hasAnyLibraryEntries(partLibrary) {
+  return PART_KEYS.some((partKey) => (partLibrary?.[partKey] || []).length > 0);
+}
+
+function clonePartLibrary(partLibrary) {
+  const clone = createEmptyPartLibrary();
+  PART_KEYS.forEach((partKey) => {
+    clone[partKey] = (partLibrary?.[partKey] || []).map((item) => ({ ...item }));
+  });
+  return clone;
+}
+
+function sanitizePartLibrary(raw) {
+  const result = createEmptyPartLibrary();
+
+  PART_KEYS.forEach((partKey) => {
+    const list = Array.isArray(raw?.[partKey]) ? raw[partKey] : [];
+    result[partKey] = list
+      .filter((item) => item && typeof item.id === 'string' && typeof item.dataUrl === 'string')
+      .map((item) => ({
+        id: item.id,
+        name: typeof item.name === 'string' ? item.name : 'Custom part',
+        dataUrl: item.dataUrl,
+      }));
+  });
+
+  return result;
+}
+
+function mergePartLibraries(primary, fallback) {
+  const merged = createEmptyPartLibrary();
+
+  PART_KEYS.forEach((partKey) => {
+    const output = [];
+    const seenUrls = new Set();
+
+    const appendList = (list) => {
+      (list || []).forEach((item) => {
+        if (!item?.dataUrl || seenUrls.has(item.dataUrl)) return;
+        seenUrls.add(item.dataUrl);
+        output.push({ ...item });
+      });
+    };
+
+    appendList(primary?.[partKey]);
+    appendList(fallback?.[partKey]);
+
+    merged[partKey] = output;
+  });
+
+  return merged;
+}
+
+function fileNameFromPath(path) {
+  return String(path || '').split('/').pop() || '';
+}
+
+function stripExtension(fileName) {
+  return String(fileName || '').replace(/\.[^/.]+$/, '');
+}
+
+function inferPartKeyFromName(fileName) {
+  const lower = String(fileName || '').toLowerCase();
+  if (lower.includes('head')) return 'head';
+  if (lower.includes('body') || lower.includes('torso')) return 'body';
+  if (lower.includes('tail')) return 'tail';
+  if (lower.includes('leg') || lower.includes('paw') || lower.includes('feet')) return 'leg';
+  return null;
 }
 
 function createPartId() {
@@ -121,44 +140,13 @@ function readFileAsDataUrl(file) {
   });
 }
 
-function decodeImageToCanvas(dataUrl) {
+function decodeImage(dataUrl) {
   return new Promise((resolve, reject) => {
     const image = new Image();
-
-    image.onload = () => {
-      const maxSide = 512;
-      const ratio = Math.min(1, maxSide / Math.max(image.width, image.height));
-      const targetW = Math.max(1, Math.round(image.width * ratio));
-      const targetH = Math.max(1, Math.round(image.height * ratio));
-
-      const canvas = createCanvas(targetW, targetH);
-      const ctx = canvas.getContext('2d');
-      ctx.clearRect(0, 0, targetW, targetH);
-      ctx.drawImage(image, 0, 0, targetW, targetH);
-      resolve(canvas);
-    };
-
+    image.onload = () => resolve(image);
     image.onerror = () => reject(new Error('Image decode failed'));
     image.src = dataUrl;
   });
-}
-
-function hexToRgb(hex) {
-  const value = hex.replace('#', '');
-  return {
-    r: Number.parseInt(value.slice(0, 2), 16),
-    g: Number.parseInt(value.slice(2, 4), 16),
-    b: Number.parseInt(value.slice(4, 6), 16),
-  };
-}
-
-function shade(hex, amount) {
-  const rgb = hexToRgb(hex);
-  const clamp = (n) => Math.max(0, Math.min(255, n));
-  const r = clamp(rgb.r + amount);
-  const g = clamp(rgb.g + amount);
-  const b = clamp(rgb.b + amount);
-  return `rgb(${r}, ${g}, ${b})`;
 }
 
 function drawCheckerboard(ctx, w, h, tile = 10) {
@@ -170,268 +158,109 @@ function drawCheckerboard(ctx, w, h, tile = 10) {
   }
 }
 
-function drawPattern(ctx, type, color, w, h, seed = 0) {
-  if (type === 'none') return;
+function fitImageIntoCanvas(image, targetW, targetH) {
+  const canvas = createCanvas(targetW, targetH);
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, targetW, targetH);
 
-  if (type === 'stripes') {
-    ctx.save();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 8;
-    ctx.globalAlpha = 0.45;
-    for (let i = -1; i < 7; i++) {
-      const x = (w / 6) * i + (seed % 2 ? 6 : 0);
-      ctx.beginPath();
-      ctx.moveTo(x, h * 0.15);
-      ctx.quadraticCurveTo(x + 16, h * 0.45, x - 12, h * 0.8);
-      ctx.stroke();
+  if (!image.width || !image.height) {
+    return canvas;
+  }
+
+  const scale = Math.min(targetW / image.width, targetH / image.height);
+  const drawW = Math.max(1, Math.round(image.width * scale));
+  const drawH = Math.max(1, Math.round(image.height * scale));
+  const drawX = Math.round((targetW - drawW) / 2);
+  const drawY = Math.round((targetH - drawH) / 2);
+
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(image, drawX, drawY, drawW, drawH);
+  return canvas;
+}
+
+async function decodeImageToCanvas(dataUrl, partKey = null) {
+  const image = await decodeImage(dataUrl);
+
+  if (partKey && PART_SIZES[partKey]) {
+    const [targetW, targetH] = PART_SIZES[partKey];
+    return fitImageIntoCanvas(image, targetW, targetH);
+  }
+
+  const maxSide = 512;
+  const ratio = Math.min(1, maxSide / Math.max(image.width || 1, image.height || 1));
+  const targetW = Math.max(1, Math.round((image.width || 1) * ratio));
+  const targetH = Math.max(1, Math.round((image.height || 1) * ratio));
+  return fitImageIntoCanvas(image, targetW, targetH);
+}
+
+function canvasToCompressedDataUrl(canvas) {
+  try {
+    const webp = canvas.toDataURL('image/webp', 0.86);
+    if (webp.startsWith('data:image/webp')) {
+      return webp;
     }
-    ctx.restore();
-    return;
+  } catch {
+    // Ignore and fallback to PNG.
   }
 
-  if (type === 'spots') {
-    ctx.save();
-    ctx.fillStyle = color;
-    ctx.globalAlpha = 0.38;
-    for (let i = 0; i < 7; i++) {
-      const rx = 10 + ((i * 29 + seed * 17) % (w - 20));
-      const ry = 12 + ((i * 21 + seed * 31) % (h - 24));
-      const rw = 7 + ((i * 7) % 14);
-      const rh = 6 + ((i * 9) % 13);
-      ctx.beginPath();
-      ctx.ellipse(rx, ry, rw, rh, (i * Math.PI) / 6, 0, Math.PI * 2);
-      ctx.fill();
+  return canvas.toDataURL('image/png');
+}
+
+function createDefaultSelectedPartsFromLibrary(partLibrary) {
+  const selected = createEmptySelectedParts();
+  PART_KEYS.forEach((partKey) => {
+    selected[partKey] = partLibrary[partKey]?.[0]?.id || null;
+  });
+  return selected;
+}
+
+function sanitizeSelectedParts(raw, partLibrary) {
+  const selected = createEmptySelectedParts();
+
+  PART_KEYS.forEach((partKey) => {
+    const hasExplicitKey = raw && Object.prototype.hasOwnProperty.call(raw, partKey);
+    const desiredId = typeof raw?.[partKey] === 'string' ? raw[partKey] : null;
+    const exists = desiredId && (partLibrary[partKey] || []).some((item) => item.id === desiredId);
+
+    if (hasExplicitKey) {
+      selected[partKey] = exists ? desiredId : null;
+      return;
     }
-    ctx.restore();
-  }
+
+    selected[partKey] = partLibrary[partKey]?.[0]?.id || null;
+  });
+
+  return selected;
 }
 
-function roundedRectPath(ctx, x, y, w, h, r) {
-  const radius = Math.min(r, w / 2, h / 2);
-  ctx.moveTo(x + radius, y);
-  ctx.lineTo(x + w - radius, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
-  ctx.lineTo(x + w, y + h - radius);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
-  ctx.lineTo(x + radius, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
-  ctx.lineTo(x, y + radius);
-  ctx.quadraticCurveTo(x, y, x + radius, y);
-  ctx.closePath();
+function buildBundledDefaultPartLibrary() {
+  const library = createEmptyPartLibrary();
+  const counters = { head: 0, body: 0, leg: 0, tail: 0 };
+
+  Object.entries(DEFAULT_PART_IMAGE_MODULES).forEach(([path, url]) => {
+    if (typeof url !== 'string') return;
+
+    const fileName = fileNameFromPath(path);
+    const partKey = inferPartKeyFromName(fileName);
+    if (!partKey) return;
+
+    const index = counters[partKey]++;
+    library[partKey].push({
+      id: `bundled-${partKey}-${index}`,
+      name: stripExtension(fileName).replace(/[-_]+/g, ' '),
+      dataUrl: url,
+    });
+  });
+
+  PART_KEYS.forEach((partKey) => {
+    library[partKey].sort((a, b) => a.name.localeCompare(b.name));
+  });
+
+  return library;
 }
 
-function drawHeadPart(ctx, cfg) {
-  const w = ctx.canvas.width;
-  const h = ctx.canvas.height;
-
-  const outline = shade(cfg.furColor, -25);
-
-  ctx.clearRect(0, 0, w, h);
-
-  ctx.fillStyle = cfg.furColor;
-  ctx.beginPath();
-  ctx.moveTo(54, 74);
-  ctx.lineTo(76, 30);
-  ctx.lineTo(104, 74);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.beginPath();
-  ctx.moveTo(146, 74);
-  ctx.lineTo(124, 30);
-  ctx.lineTo(96, 74);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.fillStyle = cfg.earColor;
-  ctx.beginPath();
-  ctx.moveTo(67, 69);
-  ctx.lineTo(78, 45);
-  ctx.lineTo(93, 69);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.beginPath();
-  ctx.moveTo(133, 69);
-  ctx.lineTo(122, 45);
-  ctx.lineTo(107, 69);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.fillStyle = cfg.furColor;
-  ctx.beginPath();
-  ctx.ellipse(100, 112, 67, 56, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.ellipse(100, 112, 67, 56, 0, 0, Math.PI * 2);
-  ctx.clip();
-  drawPattern(ctx, cfg.patternType, cfg.patternColor, 130, 110, 2);
-  ctx.restore();
-
-  ctx.fillStyle = cfg.bellyColor;
-  ctx.beginPath();
-  ctx.ellipse(100, 128, 34, 22, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  const eyeY = cfg.eyeStyle === 'sleepy' ? 101 : 104;
-  const eyeRX = cfg.eyeStyle === 'big' ? 9 : 7;
-  const eyeRY = cfg.eyeStyle === 'sleepy' ? 3 : cfg.eyeStyle === 'big' ? 12 : 10;
-
-  ctx.fillStyle = '#151515';
-  ctx.beginPath();
-  ctx.ellipse(78, eyeY, eyeRX, eyeRY, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(122, eyeY, eyeRX, eyeRY, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.fillStyle = cfg.eyeColor;
-  const irisRY = cfg.eyeStyle === 'sleepy' ? 2 : eyeRY - 2;
-  ctx.beginPath();
-  ctx.ellipse(78, eyeY, Math.max(4, eyeRX - 2), Math.max(1.5, irisRY), 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(122, eyeY, Math.max(4, eyeRX - 2), Math.max(1.5, irisRY), 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.fillStyle = '#ff7d9f';
-  ctx.beginPath();
-  ctx.moveTo(100, 114);
-  ctx.lineTo(95, 120);
-  ctx.lineTo(105, 120);
-  ctx.closePath();
-  ctx.fill();
-
-  ctx.strokeStyle = outline;
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  ctx.ellipse(100, 112, 67, 56, 0, 0, Math.PI * 2);
-  ctx.stroke();
-}
-
-function drawBodyPart(ctx, cfg) {
-  const w = ctx.canvas.width;
-  const h = ctx.canvas.height;
-
-  ctx.clearRect(0, 0, w, h);
-
-  ctx.fillStyle = cfg.furColor;
-  ctx.beginPath();
-  ctx.ellipse(90, 82, 70, 62, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.ellipse(90, 82, 70, 62, 0, 0, Math.PI * 2);
-  ctx.clip();
-  drawPattern(ctx, cfg.patternType, cfg.patternColor, 180, 160, 4);
-  ctx.restore();
-
-  ctx.fillStyle = cfg.bellyColor;
-  ctx.beginPath();
-  ctx.ellipse(95, 93, 40, 36, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.strokeStyle = shade(cfg.furColor, -22);
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  ctx.ellipse(90, 82, 70, 62, 0, 0, Math.PI * 2);
-  ctx.stroke();
-}
-
-function drawLegPart(ctx, cfg) {
-  const w = ctx.canvas.width;
-  const h = ctx.canvas.height;
-
-  ctx.clearRect(0, 0, w, h);
-
-  ctx.fillStyle = cfg.furColor;
-  ctx.beginPath();
-  roundedRectPath(ctx, 18, 18, 44, 95, 18);
-  ctx.fill();
-
-  if (cfg.hasSocks) {
-    ctx.fillStyle = cfg.bellyColor;
-    ctx.beginPath();
-    roundedRectPath(ctx, 18, 78, 44, 35, 14);
-    ctx.fill();
-  }
-
-  if (cfg.patternType !== 'none') {
-    ctx.strokeStyle = cfg.patternColor;
-    ctx.globalAlpha = 0.4;
-    ctx.lineWidth = 5;
-    ctx.beginPath();
-    ctx.moveTo(25, 34);
-    ctx.quadraticCurveTo(36, 48, 26, 63);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-  }
-
-  ctx.strokeStyle = shade(cfg.furColor, -20);
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  roundedRectPath(ctx, 18, 18, 44, 95, 18);
-  ctx.stroke();
-}
-
-function drawTailPart(ctx, cfg) {
-  const w = ctx.canvas.width;
-  const h = ctx.canvas.height;
-
-  ctx.clearRect(0, 0, w, h);
-
-  ctx.strokeStyle = cfg.furColor;
-  ctx.lineWidth = 34;
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  ctx.moveTo(40, 184);
-  ctx.bezierCurveTo(27, 145, 18, 93, 43, 56);
-  ctx.stroke();
-
-  if (cfg.hasTailTip) {
-    ctx.strokeStyle = cfg.bellyColor;
-    ctx.lineWidth = 16;
-    ctx.beginPath();
-    ctx.moveTo(43, 64);
-    ctx.bezierCurveTo(39, 55, 36, 46, 44, 38);
-    ctx.stroke();
-  }
-
-  if (cfg.patternType !== 'none') {
-    ctx.strokeStyle = cfg.patternColor;
-    ctx.globalAlpha = 0.35;
-    ctx.lineWidth = 8;
-    for (let y = 170; y >= 84; y -= 26) {
-      ctx.beginPath();
-      ctx.moveTo(30, y);
-      ctx.quadraticCurveTo(40, y - 5, 52, y - 16);
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-  }
-}
-
-function buildKittenParts(config) {
-  const [headW, headH] = PART_SIZES.head;
-  const [bodyW, bodyH] = PART_SIZES.body;
-  const [legW, legH] = PART_SIZES.leg;
-  const [tailW, tailH] = PART_SIZES.tail;
-
-  const head = createCanvas(headW, headH);
-  const body = createCanvas(bodyW, bodyH);
-  const leg = createCanvas(legW, legH);
-  const tail = createCanvas(tailW, tailH);
-
-  drawHeadPart(head.getContext('2d'), config);
-  drawBodyPart(body.getContext('2d'), config);
-  drawLegPart(leg.getContext('2d'), config);
-  drawTailPart(tail.getContext('2d'), config);
-
-  return { head, body, leg, tail };
-}
+const BUNDLED_DEFAULT_PART_LIBRARY = buildBundledDefaultPartLibrary();
 
 function loadInitialKitten(initialKitten = null) {
   if (initialKitten) {
@@ -456,72 +285,76 @@ function loadInitialKitten(initialKitten = null) {
 
 function loadInitialPartLibrary(initialPartLibrary = null) {
   if (initialPartLibrary) {
-    const result = createEmptyPartLibrary();
-    PART_KEYS.forEach((partKey) => {
-      const list = Array.isArray(initialPartLibrary?.[partKey]) ? initialPartLibrary[partKey] : [];
-      result[partKey] = list
-        .filter((item) => item && typeof item.id === 'string' && typeof item.dataUrl === 'string')
-        .map((item) => ({
-          id: item.id,
-          name: typeof item.name === 'string' ? item.name : 'Custom part',
-          dataUrl: item.dataUrl,
-        }));
-    });
-    return result;
+    const fromInitial = sanitizePartLibrary(initialPartLibrary);
+    if (hasAnyLibraryEntries(fromInitial)) {
+      return fromInitial;
+    }
+    return mergePartLibraries(fromInitial, BUNDLED_DEFAULT_PART_LIBRARY);
   }
 
   try {
     const raw = localStorage.getItem(STORAGE_KEY_PART_LIBRARY);
-    if (!raw) return createEmptyPartLibrary();
+    if (!raw) {
+      return clonePartLibrary(BUNDLED_DEFAULT_PART_LIBRARY);
+    }
 
     const parsed = JSON.parse(raw);
-    const result = createEmptyPartLibrary();
+    const fromStorage = sanitizePartLibrary(parsed);
+    if (hasAnyLibraryEntries(fromStorage)) {
+      return fromStorage;
+    }
 
-    PART_KEYS.forEach((partKey) => {
-      const list = Array.isArray(parsed?.[partKey]) ? parsed[partKey] : [];
-      result[partKey] = list
-        .filter((item) => item && typeof item.id === 'string' && typeof item.dataUrl === 'string')
-        .map((item) => ({
-          id: item.id,
-          name: typeof item.name === 'string' ? item.name : 'Custom part',
-          dataUrl: item.dataUrl,
-        }));
-    });
-
-    return result;
+    return mergePartLibraries(fromStorage, BUNDLED_DEFAULT_PART_LIBRARY);
   } catch {
-    return createEmptyPartLibrary();
+    return clonePartLibrary(BUNDLED_DEFAULT_PART_LIBRARY);
   }
 }
 
-function loadInitialSelectedParts(initialSelectedParts = null) {
+function loadInitialSelectedParts(initialSelectedParts = null, partLibrary = createEmptyPartLibrary()) {
   if (initialSelectedParts) {
-    return {
-      head: typeof initialSelectedParts?.head === 'string' ? initialSelectedParts.head : null,
-      body: typeof initialSelectedParts?.body === 'string' ? initialSelectedParts.body : null,
-      leg: typeof initialSelectedParts?.leg === 'string' ? initialSelectedParts.leg : null,
-      tail: typeof initialSelectedParts?.tail === 'string' ? initialSelectedParts.tail : null,
-    };
+    return sanitizeSelectedParts(initialSelectedParts, partLibrary);
   }
 
   try {
     const raw = localStorage.getItem(STORAGE_KEY_SELECTED_PARTS);
-    if (!raw) return createEmptySelectedParts();
-    const parsed = JSON.parse(raw);
+    if (!raw) {
+      return createDefaultSelectedPartsFromLibrary(partLibrary);
+    }
 
-    return {
-      head: typeof parsed?.head === 'string' ? parsed.head : null,
-      body: typeof parsed?.body === 'string' ? parsed.body : null,
-      leg: typeof parsed?.leg === 'string' ? parsed.leg : null,
-      tail: typeof parsed?.tail === 'string' ? parsed.tail : null,
-    };
+    const parsed = JSON.parse(raw);
+    return sanitizeSelectedParts(parsed, partLibrary);
   } catch {
-    return createEmptySelectedParts();
+    return createDefaultSelectedPartsFromLibrary(partLibrary);
   }
 }
 
-function randomFrom(list) {
-  return list[Math.floor(Math.random() * list.length)];
+function drawContain(ctx, sourceCanvas, x, y, width, height) {
+  if (!sourceCanvas?.width || !sourceCanvas?.height) return;
+
+  const scale = Math.min(width / sourceCanvas.width, height / sourceCanvas.height);
+  const drawW = Math.max(1, Math.round(sourceCanvas.width * scale));
+  const drawH = Math.max(1, Math.round(sourceCanvas.height * scale));
+  const drawX = Math.round(x + (width - drawW) / 2);
+  const drawY = Math.round(y + (height - drawH) / 2);
+
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(sourceCanvas, drawX, drawY, drawW, drawH);
+}
+
+function drawPlaceholder(ctx, x, y, width, height) {
+  ctx.fillStyle = 'rgba(255,255,255,0.07)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+  ctx.lineWidth = 2;
+  ctx.fillRect(x, y, width, height);
+  ctx.strokeRect(x, y, width, height);
+
+  ctx.beginPath();
+  ctx.moveTo(x + 8, y + 8);
+  ctx.lineTo(x + width - 8, y + height - 8);
+  ctx.moveTo(x + width - 8, y + 8);
+  ctx.lineTo(x + 8, y + height - 8);
+  ctx.stroke();
 }
 
 function CanvasPreview({ title, sourceCanvas, sourceLabel }) {
@@ -529,12 +362,20 @@ function CanvasPreview({ title, sourceCanvas, sourceLabel }) {
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !sourceCanvas) return;
-    canvas.width = sourceCanvas.width;
-    canvas.height = sourceCanvas.height;
+    if (!canvas) return;
+
+    const size = 136;
+    canvas.width = size;
+    canvas.height = size;
     const ctx = canvas.getContext('2d');
-    drawCheckerboard(ctx, canvas.width, canvas.height, 10);
-    ctx.drawImage(sourceCanvas, 0, 0);
+
+    drawCheckerboard(ctx, size, size, 8);
+    if (sourceCanvas) {
+      drawContain(ctx, sourceCanvas, 8, 8, size - 16, size - 16);
+      return;
+    }
+
+    drawPlaceholder(ctx, 8, 8, size - 16, size - 16);
   }, [sourceCanvas]);
 
   return (
@@ -544,8 +385,8 @@ function CanvasPreview({ title, sourceCanvas, sourceLabel }) {
       <canvas
         ref={canvasRef}
         style={{
-          width: Math.max(100, sourceCanvas.width * 0.75),
-          height: Math.max(100, sourceCanvas.height * 0.75),
+          width: 136,
+          height: 136,
           imageRendering: 'pixelated',
           borderRadius: 10,
           border: '1px solid rgba(255,255,255,0.2)',
@@ -555,6 +396,84 @@ function CanvasPreview({ title, sourceCanvas, sourceLabel }) {
   );
 }
 
+function FullKittenPreview({ parts }) {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const width = 470;
+    const height = 280;
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext('2d');
+
+    const bg = ctx.createLinearGradient(0, 0, 0, height);
+    bg.addColorStop(0, '#1d2538');
+    bg.addColorStop(1, '#131a2a');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.fillStyle = 'rgba(0,0,0,0.24)';
+    ctx.beginPath();
+    ctx.ellipse(265, 230, 115, 22, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    const drawPartBox = (sourceCanvas, box) => {
+      ctx.save();
+      const centerX = box.x + box.w / 2;
+      const centerY = box.y + box.h / 2;
+      ctx.translate(centerX, centerY);
+      if (box.rotation) ctx.rotate(box.rotation);
+      if (box.flipX) ctx.scale(-1, 1);
+
+      if (sourceCanvas) {
+        drawContain(ctx, sourceCanvas, -box.w / 2, -box.h / 2, box.w, box.h);
+      } else {
+        drawPlaceholder(ctx, -box.w / 2, -box.h / 2, box.w, box.h);
+      }
+
+      ctx.restore();
+    };
+
+    drawPartBox(parts.tail, { x: 120, y: 84, w: 110, h: 170, rotation: -0.45 });
+    drawPartBox(parts.leg, { x: 244, y: 168, w: 48, h: 96 });
+    drawPartBox(parts.leg, { x: 282, y: 168, w: 48, h: 96 });
+    drawPartBox(parts.body, { x: 206, y: 114, w: 180, h: 132 });
+    drawPartBox(parts.leg, { x: 322, y: 168, w: 48, h: 96 });
+    drawPartBox(parts.leg, { x: 358, y: 168, w: 48, h: 96 });
+    drawPartBox(parts.head, { x: 312, y: 60, w: 132, h: 126 });
+
+    ctx.fillStyle = 'rgba(223, 246, 255, 0.8)';
+    ctx.font = '13px purrabet-regular, sans-serif';
+    ctx.fillText('Live in-game body composition preview', 16, 24);
+  }, [parts]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      style={{
+        width: '100%',
+        maxWidth: 470,
+        borderRadius: 12,
+        border: '1px solid rgba(255,255,255,0.16)',
+        imageRendering: 'pixelated',
+      }}
+    />
+  );
+}
+
+function buildInitialEditorState(initialKitten, initialPartLibrary, initialSelectedParts) {
+  const partLibrary = loadInitialPartLibrary(initialPartLibrary);
+  return {
+    kitten: loadInitialKitten(initialKitten),
+    partLibrary,
+    selectedParts: loadInitialSelectedParts(initialSelectedParts, partLibrary),
+  };
+}
+
 const DrawingEditor = ({
   onComplete,
   initialKitten,
@@ -562,21 +481,37 @@ const DrawingEditor = ({
   initialSelectedParts,
   topBar,
 }) => {
-  const [kitten, setKitten] = useState(() => loadInitialKitten(initialKitten));
-  const [partLibrary, setPartLibrary] = useState(() => loadInitialPartLibrary(initialPartLibrary));
-  const [selectedParts, setSelectedParts] = useState(() => loadInitialSelectedParts(initialSelectedParts));
+  const [initialState] = useState(() => (
+    buildInitialEditorState(initialKitten, initialPartLibrary, initialSelectedParts)
+  ));
+
+  const [kitten, setKitten] = useState(initialState.kitten);
+  const [partLibrary, setPartLibrary] = useState(initialState.partLibrary);
+  const [selectedParts, setSelectedParts] = useState(initialState.selectedParts);
   const [customPartCanvases, setCustomPartCanvases] = useState({});
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY_KITTEN, JSON.stringify(kitten));
+    try {
+      localStorage.setItem(STORAGE_KEY_KITTEN, JSON.stringify(kitten));
+    } catch {
+      // Ignore storage errors.
+    }
   }, [kitten]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY_PART_LIBRARY, JSON.stringify(partLibrary));
+    try {
+      localStorage.setItem(STORAGE_KEY_PART_LIBRARY, JSON.stringify(partLibrary));
+    } catch {
+      // Ignore storage errors.
+    }
   }, [partLibrary]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY_SELECTED_PARTS, JSON.stringify(selectedParts));
+    try {
+      localStorage.setItem(STORAGE_KEY_SELECTED_PARTS, JSON.stringify(selectedParts));
+    } catch {
+      // Ignore storage errors.
+    }
   }, [selectedParts]);
 
   useEffect(() => {
@@ -593,9 +528,9 @@ const DrawingEditor = ({
         if (!entry?.dataUrl) continue;
 
         try {
-          nextCanvases[partKey] = await decodeImageToCanvas(entry.dataUrl);
+          nextCanvases[partKey] = await decodeImageToCanvas(entry.dataUrl, partKey);
         } catch {
-          // Ignore broken images and keep generated part instead.
+          // Ignore broken images and fallback to game default for this part.
         }
       }
 
@@ -611,66 +546,34 @@ const DrawingEditor = ({
     };
   }, [partLibrary, selectedParts]);
 
-  const generatedParts = useMemo(() => buildKittenParts(kitten), [kitten]);
-
   const parts = useMemo(() => {
-    return {
-      ...generatedParts,
-      ...customPartCanvases,
-    };
-  }, [generatedParts, customPartCanvases]);
-
-  const setField = (key, value) => {
-    setKitten((prev) => ({ ...prev, [key]: value }));
-  };
-
-  const applyPreset = (preset) => {
-    setKitten((prev) => ({
-      ...prev,
-      furColor: preset.fur,
-      bellyColor: preset.belly,
-      patternColor: preset.pattern,
-      eyeColor: preset.eye,
-      earColor: preset.ear,
-    }));
-  };
-
-  const randomize = () => {
-    const preset = randomFrom(FUR_PRESETS);
-    setKitten((prev) => ({
-      ...prev,
-      furColor: preset.fur,
-      bellyColor: preset.belly,
-      patternColor: preset.pattern,
-      eyeColor: preset.eye,
-      earColor: preset.ear,
-      patternType: randomFrom(PATTERN_OPTIONS).value,
-      eyeStyle: randomFrom(EYE_OPTIONS).value,
-      hasSocks: Math.random() > 0.35,
-      hasTailTip: Math.random() > 0.35,
-    }));
-  };
-
-  const resetToDefault = () => {
-    setKitten(DEFAULT_KITTEN);
-  };
+    const output = {};
+    PART_KEYS.forEach((partKey) => {
+      if (customPartCanvases[partKey]) {
+        output[partKey] = customPartCanvases[partKey];
+      }
+    });
+    return output;
+  }, [customPartCanvases]);
 
   const uploadPart = async (partKey, file) => {
     if (!file || !file.type.startsWith('image/')) return;
 
     try {
       const dataUrl = await readFileAsDataUrl(file);
-      const baseName = file.name.replace(/\.[^/.]+$/, '');
+      const normalizedCanvas = await decodeImageToCanvas(dataUrl, partKey);
+      const compressedDataUrl = canvasToCompressedDataUrl(normalizedCanvas);
+      const baseName = stripExtension(file.name);
 
       const newEntry = {
         id: createPartId(),
         name: baseName || 'Custom part',
-        dataUrl,
+        dataUrl: compressedDataUrl,
       };
 
       setPartLibrary((prev) => ({
         ...prev,
-        [partKey]: [newEntry, ...(prev[partKey] || [])].slice(0, 20),
+        [partKey]: [newEntry, ...(prev[partKey] || [])].slice(0, 40),
       }));
 
       setSelectedParts((prev) => ({
@@ -706,13 +609,13 @@ const DrawingEditor = ({
 
   const partSourceLabel = (partKey) => {
     const selectedId = selectedParts[partKey];
-    if (!selectedId) return 'Generated';
+    if (!selectedId) return 'Game default';
+
     const exists = (partLibrary[partKey] || []).some((item) => item.id === selectedId);
-    return exists ? 'Custom' : 'Generated';
+    return exists ? 'Selected image' : 'Game default';
   };
 
   const handleComplete = () => {
-    console.log('[Editor] Kitten generated, entering game');
     onComplete({
       parts,
       kitten,
@@ -727,20 +630,7 @@ const DrawingEditor = ({
 
       <div style={s.headerRow}>
         <h1 style={s.title}>Kitten Builder</h1>
-        <p style={s.subtitle}>Create your kitten skin, scroll through options, then enter the online room.</p>
-      </div>
-
-      <div style={s.presetRow}>
-        {FUR_PRESETS.map((preset) => (
-          <button
-            key={preset.name}
-            style={{ ...s.presetBtn, background: preset.fur }}
-            onClick={() => applyPreset(preset)}
-            title={`Apply ${preset.name}`}
-          >
-            {preset.name}
-          </button>
-        ))}
+        <p style={s.subtitle}>Upload your own part images, set defaults, then preview the full kitten before entering the room.</p>
       </div>
 
       <div style={s.layout}>
@@ -748,63 +638,15 @@ const DrawingEditor = ({
           <label style={s.label}>Kitten name</label>
           <input
             type="text"
-            value={kitten.name}
-            onChange={(e) => setField('name', e.target.value.slice(0, 24))}
+            value={kitten.name || ''}
+            onChange={(event) => setKitten((prev) => ({ ...prev, name: event.target.value.slice(0, 24) }))}
             style={s.input}
             placeholder="Your kitten"
           />
 
-          <div style={s.colorsGrid}>
-            <label style={s.colorField}><span>Fur</span><input type="color" value={kitten.furColor} onChange={(e) => setField('furColor', e.target.value)} /></label>
-            <label style={s.colorField}><span>Belly</span><input type="color" value={kitten.bellyColor} onChange={(e) => setField('bellyColor', e.target.value)} /></label>
-            <label style={s.colorField}><span>Pattern</span><input type="color" value={kitten.patternColor} onChange={(e) => setField('patternColor', e.target.value)} /></label>
-            <label style={s.colorField}><span>Eyes</span><input type="color" value={kitten.eyeColor} onChange={(e) => setField('eyeColor', e.target.value)} /></label>
-            <label style={s.colorField}><span>Ear inside</span><input type="color" value={kitten.earColor} onChange={(e) => setField('earColor', e.target.value)} /></label>
-          </div>
-
-          <label style={s.label}>Pattern</label>
-          <select
-            value={kitten.patternType}
-            onChange={(e) => setField('patternType', e.target.value)}
-            style={s.input}
-          >
-            {PATTERN_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
-
-          <label style={s.label}>Eyes style</label>
-          <select
-            value={kitten.eyeStyle}
-            onChange={(e) => setField('eyeStyle', e.target.value)}
-            style={s.input}
-          >
-            {EYE_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
-
-          <label style={s.toggleRow}>
-            <input
-              type="checkbox"
-              checked={kitten.hasSocks}
-              onChange={(e) => setField('hasSocks', e.target.checked)}
-            />
-            White socks on paws
-          </label>
-
-          <label style={s.toggleRow}>
-            <input
-              type="checkbox"
-              checked={kitten.hasTailTip}
-              onChange={(e) => setField('hasTailTip', e.target.checked)}
-            />
-            Light tail tip
-          </label>
-
           <div style={s.customSection}>
-            <h3 style={s.customHeading}>Your drawn skin parts</h3>
-            <p style={s.customHint}>Upload transparent PNG files and pick which one to use for each body part.</p>
+            <h3 style={s.customHeading}>Body part image library</h3>
+            <p style={s.customHint}>Only your uploaded/default images are used. Missing parts fallback to the in-game skeleton default.</p>
 
             {PART_KEYS.map((partKey) => {
               const list = partLibrary[partKey] || [];
@@ -820,10 +662,10 @@ const DrawingEditor = ({
                         type="file"
                         accept="image/png,image/webp,image/jpeg"
                         style={s.hiddenInput}
-                        onChange={(e) => {
-                          const file = e.target.files?.[0];
+                        onChange={(event) => {
+                          const file = event.target.files?.[0];
                           uploadPart(partKey, file);
-                          e.target.value = '';
+                          event.target.value = '';
                         }}
                       />
                     </label>
@@ -838,7 +680,7 @@ const DrawingEditor = ({
                       }}
                       onClick={() => choosePart(partKey, null)}
                     >
-                      Use generated
+                      Use game default
                     </button>
 
                     {list.map((item) => {
@@ -871,7 +713,7 @@ const DrawingEditor = ({
                     })}
 
                     {list.length === 0 && (
-                      <span style={s.emptyChoiceHint}>No uploaded items yet</span>
+                      <span style={s.emptyChoiceHint}>No images yet. Upload your own files for this part.</span>
                     )}
                   </div>
                 </div>
@@ -880,16 +722,17 @@ const DrawingEditor = ({
           </div>
 
           <div style={s.actionsRow}>
-            <button style={s.secondaryBtn} onClick={randomize}>Random</button>
-            <button style={s.secondaryBtn} onClick={resetToDefault}>Reset</button>
             <button style={s.primaryBtn} onClick={handleComplete}>Play as this kitten</button>
           </div>
         </div>
 
         <div style={s.previewPanel}>
-          <h2 style={s.previewHeading}>Preview parts</h2>
-          <p style={s.previewHint}>These canvases are applied directly to the current Spine skeleton.</p>
+          <h2 style={s.previewHeading}>Full kitten preview</h2>
+          <p style={s.previewHint}>This combines all selected parts so you can see the full in-game look before saving.</p>
 
+          <FullKittenPreview parts={parts} />
+
+          <h3 style={s.previewSubheading}>Part previews</h3>
           <div style={s.previewGrid}>
             <CanvasPreview title="Head" sourceCanvas={parts.head} sourceLabel={partSourceLabel('head')} />
             <CanvasPreview title="Body" sourceCanvas={parts.body} sourceLabel={partSourceLabel('body')} />
@@ -918,7 +761,7 @@ const s = {
     WebkitOverflowScrolling: 'touch',
   },
   headerRow: {
-    maxWidth: 1100,
+    maxWidth: 1180,
     width: '100%',
     margin: '0 auto',
   },
@@ -932,29 +775,12 @@ const s = {
     marginBottom: 0,
     opacity: 0.75,
   },
-  presetRow: {
-    maxWidth: 1100,
-    width: '100%',
-    margin: '0 auto',
-    display: 'flex',
-    gap: 8,
-    flexWrap: 'wrap',
-  },
-  presetBtn: {
-    border: '1px solid rgba(255,255,255,0.35)',
-    color: '#0d111e',
-    fontWeight: 700,
-    borderRadius: 10,
-    padding: '8px 12px',
-    cursor: 'pointer',
-    minWidth: 84,
-  },
   layout: {
     width: '100%',
-    maxWidth: 1100,
+    maxWidth: 1180,
     margin: '0 auto',
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))',
     gap: 16,
     alignItems: 'start',
   },
@@ -979,25 +805,6 @@ const s = {
     padding: '8px 10px',
     fontSize: 14,
   },
-  colorsGrid: {
-    display: 'grid',
-    gridTemplateColumns: '1fr 1fr',
-    gap: 8,
-  },
-  colorField: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    fontSize: 13,
-    gap: 8,
-  },
-  toggleRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    fontSize: 14,
-    opacity: 0.95,
-  },
   customSection: {
     marginTop: 6,
     padding: 10,
@@ -1007,7 +814,7 @@ const s = {
     display: 'flex',
     flexDirection: 'column',
     gap: 10,
-    maxHeight: '44vh',
+    maxHeight: '60vh',
     overflowY: 'auto',
     WebkitOverflowScrolling: 'touch',
   },
@@ -1082,15 +889,15 @@ const s = {
     flexDirection: 'column',
     alignItems: 'center',
     gap: 4,
-    width: 82,
+    width: 84,
   },
   choiceItemActive: {
     border: '1px solid rgba(86,231,143,0.8)',
     boxShadow: '0 0 0 2px rgba(86,231,143,0.22) inset',
   },
   choiceImg: {
-    width: 54,
-    height: 54,
+    width: 56,
+    height: 56,
     objectFit: 'contain',
     imageRendering: 'pixelated',
     borderRadius: 6,
@@ -1126,21 +933,13 @@ const s = {
     marginTop: 6,
   },
   primaryBtn: {
-    flex: '1 1 180px',
+    flex: '1 1 220px',
     background: 'linear-gradient(135deg, #56e78f 0%, #3ec8cb 100%)',
     color: '#09101f',
     border: 'none',
     borderRadius: 10,
     padding: '10px 14px',
     fontWeight: 700,
-    cursor: 'pointer',
-  },
-  secondaryBtn: {
-    background: 'rgba(255,255,255,0.11)',
-    color: '#f0f4ff',
-    border: '1px solid rgba(255,255,255,0.25)',
-    borderRadius: 10,
-    padding: '10px 12px',
     cursor: 'pointer',
   },
   previewPanel: {
@@ -1155,6 +954,11 @@ const s = {
   previewHeading: {
     margin: 0,
     fontSize: '1.1rem',
+  },
+  previewSubheading: {
+    margin: 0,
+    marginTop: 2,
+    fontSize: '1rem',
   },
   previewHint: {
     margin: 0,

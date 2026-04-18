@@ -19,7 +19,13 @@ export function canvasesToDataUrls(parts = {}) {
 
   Object.entries(parts).forEach(([key, canvas]) => {
     if (!canvas || typeof canvas.toDataURL !== 'function') return;
-    result[key] = canvas.toDataURL('image/png');
+
+    try {
+      const compressed = canvas.toDataURL('image/webp', 0.88);
+      result[key] = compressed.startsWith('data:image/webp') ? compressed : canvas.toDataURL('image/png');
+    } catch {
+      result[key] = canvas.toDataURL('image/png');
+    }
   });
 
   return result;

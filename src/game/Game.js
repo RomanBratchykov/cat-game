@@ -1,7 +1,7 @@
 import * as PIXI from 'pixi.js';
 import { Spine } from 'pixi-spine';
 import { World }  from './core/World.js';
-import { CONFIG } from '../config.js';
+import { CONFIG, setViewportSize } from '../config.js';
 
 import { InputSystem }       from '../systems/InputSystem.js';
 import { CatMovementSystem } from '../systems/CatMovementSystem.js';
@@ -39,6 +39,15 @@ export class Game {
   constructor(canvas, options = {}) {
     console.log('[Game] Initializing...');
 
+    this._canvas = canvas;
+    this._bg = null;
+    this._floor = null;
+    this._resizeObserver = null;
+    this._onResize = this._onResize.bind(this);
+
+    const viewport = this._measureViewport();
+    setViewportSize(viewport.width, viewport.height);
+
     this._onLocalState = typeof options.onLocalState === 'function'
       ? options.onLocalState
       : null;
@@ -67,6 +76,12 @@ export class Game {
     this._pendingSkin = null;
 
     this._drawBackground();
+
+    window.addEventListener('resize', this._onResize);
+    if (typeof ResizeObserver !== 'undefined' && this._canvas?.parentElement) {
+      this._resizeObserver = new ResizeObserver(this._onResize);
+      this._resizeObserver.observe(this._canvas.parentElement);
+    }
 
     const audioSystem = new AudioSystem();
     const inputSystem = new InputSystem();
@@ -116,7 +131,29 @@ export class Game {
           this.setRemotePlayers(this._pendingRemotePlayers);
           this._pendingRemotePlayers = [];
         }
+
+        this._onResize();
       });
+  }
+
+  _measureViewport() {
+    const parent = this._canvas?.parentElement;
+    const width = parent?.clientWidth || this._canvas?.clientWidth || CONFIG.WIDTH;
+    const height = parent?.clientHeight || this._canvas?.clientHeight || CONFIG.HEIGHT;
+
+    return {
+      width,
+      height,
+    };
+  }
+
+  _onResize() {
+    if (!this._app) return;
+
+    const viewport = this._measureViewport();
+    setViewportSize(viewport.width, viewport.height);
+    this._app.renderer.resize(CONFIG.WIDTH, CONFIG.HEIGHT);
+    this._drawBackground();
   }
 
   // parts: { head?: HTMLCanvasElement, body?: ..., leg?: ..., tail?: ... }
@@ -353,20 +390,34 @@ export class Game {
   }
 
   _drawBackground() {
-    const bg = new PIXI.Graphics();
-    bg.beginFill(CONFIG.BG_COLOR);
-    bg.drawRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
-    bg.endFill();
-    this._app.stage.addChild(bg);
+    if (!this._bg) {
+      this._bg = new PIXI.Graphics();
+      this._app.stage.addChild(this._bg);
+    }
 
-    const floor = new PIXI.Graphics();
-    floor.beginFill(0x16213e);
-    floor.drawRect(0, CONFIG.FLOOR_Y, CONFIG.WIDTH, CONFIG.HEIGHT - CONFIG.FLOOR_Y);
-    floor.endFill();
-    this._app.stage.addChild(floor);
+    if (!this._floor) {
+      this._floor = new PIXI.Graphics();
+      this._app.stage.addChild(this._floor);
+    }
+
+    this._bg.clear();
+    this._bg.beginFill(CONFIG.BG_COLOR);
+    this._bg.drawRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+    this._bg.endFill();
+
+    this._floor.clear();
+    this._floor.beginFill(0x16213e);
+    this._floor.drawRect(0, CONFIG.FLOOR_Y, CONFIG.WIDTH, CONFIG.HEIGHT - CONFIG.FLOOR_Y);
+    this._floor.endFill();
   }
 
   destroy() {
+    window.removeEventListener('resize', this._onResize);
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+      this._resizeObserver = null;
+    }
+
     this._clearChatBubble('__local__');
 
     for (const key of this._chatBubbles.keys()) {
