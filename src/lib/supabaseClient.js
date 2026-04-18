@@ -4,6 +4,54 @@ const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const AUTH_SLOT_SESSION_KEY = 'cat-auth-slot';
 
+function toRequestUrl(input) {
+  if (typeof input === 'string') return input;
+  if (input instanceof URL) return input.toString();
+  return typeof input?.url === 'string' ? input.url : '';
+}
+
+function logSupabaseServerError(url, status) {
+  if (!url || !url.includes('.supabase.co')) return;
+  if (status < 500) return;
+
+  console.error(`[Supabase] HTTP ${status} from ${url}`);
+
+  if (url.includes('/auth/v1/signup')) {
+    console.error(
+      '[Supabase] Signup 500 hint: check Authentication > Providers > Email, SMTP configuration, and allowed Auth redirect URLs.'
+    );
+    return;
+  }
+
+  if (url.includes('/rest/v1/profiles')) {
+    console.error(
+      '[Supabase] Profiles 500 hint: run backend/sql/001_schema.sql and verify profiles table + RLS policies in Supabase SQL editor.'
+    );
+    return;
+  }
+
+  if (url.includes('/rest/v1/cats')) {
+    console.error(
+      '[Supabase] Cats 500 hint: verify backend/sql/001_schema.sql has been applied and RLS policies allow this user.'
+    );
+  }
+}
+
+async function supabaseFetchWithDiagnostics(input, init) {
+  try {
+    const response = await fetch(input, init);
+    const url = toRequestUrl(input);
+    logSupabaseServerError(url, response.status);
+    return response;
+  } catch (error) {
+    const url = toRequestUrl(input);
+    if (url.includes('.supabase.co')) {
+      console.error('[Supabase] Network request failed:', url, error);
+    }
+    throw error;
+  }
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function getProjectRef(url) {
@@ -44,6 +92,9 @@ function getStorageKey() {
 
 function createSupabaseClient() {
   return createClient(supabaseUrl, supabaseAnonKey, {
+    global: {
+      fetch: supabaseFetchWithDiagnostics,
+    },
     auth: {
       persistSession:   true,
       autoRefreshToken: true,
@@ -143,17 +194,32 @@ export function subscribeChannel(name, configure) {
 function reconnectAllChannels() {
   if (!supabase) return;
 
+  if (_activeChannels.size === 0) {
+    return;
+  }
+
   const state = supabase.realtime.connectionState();
   console.log('[Supabase] tab visible, connection state:', state);
 
   if (state !== 'open') {
     console.log('[Supabase] reconnecting all channels...');
-    for (const [name, { configure }] of _activeChannels) {
+    supabase.realtime.connect();
+
+    for (const [name, entry] of _activeChannels) {
+      if (entry?.channelRef) {
+        supabase.removeChannel(entry.channelRef);
+      }
+
+      const { configure } = entry;
       const channelRef = configure(supabase.channel(name)).subscribe((status, err) => {
         if (err) console.error(`[Supabase:${name}] reconnect error:`, err);
         else     console.log(`[Supabase:${name}] reconnected:`, status);
       });
-      _activeChannels.get(name).channelRef = channelRef;
+
+      _activeChannels.set(name, {
+        ...entry,
+        channelRef,
+      });
     }
   }
 }

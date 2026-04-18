@@ -35,6 +35,9 @@ const ROOM_NAME =
     .toLowerCase() ||
   'main';
 const ROOM_CHANNEL = `cat-room-${ROOM_NAME}`;
+const AUTH_EMAIL_REDIRECT_TO = typeof import.meta.env.VITE_AUTH_REDIRECT_TO === 'string'
+  ? import.meta.env.VITE_AUTH_REDIRECT_TO.trim()
+  : '';
 
 const DECOR_IMAGES = ['/assets/heart.png', '/assets/star.png'];
 const JOYSTICK_RANGE_PX = 36;
@@ -876,13 +879,18 @@ const App = () => {
 
     try {
       if (authMode === 'register') {
-        const { data, error } = await supabase.auth.signUp({
+        const signUpPayload = {
           email: trimmedEmail,
           password,
-          options: {
-            emailRedirectTo: window.location.origin,
-          },
-        });
+        };
+
+        if (AUTH_EMAIL_REDIRECT_TO) {
+          signUpPayload.options = {
+            emailRedirectTo: AUTH_EMAIL_REDIRECT_TO,
+          };
+        }
+
+        const { data, error } = await supabase.auth.signUp(signUpPayload);
         if (error) throw error;
 
         if (data.session?.user) {
@@ -902,7 +910,25 @@ const App = () => {
       const fallbackError = authMode === 'register'
         ? 'Registration failed. Please try again.'
         : 'Authentication failed.';
-      setErrorText(sanitizeError(error, fallbackError));
+      const message = sanitizeError(error, fallbackError);
+
+      if (authMode === 'register' && /error sending confirmation email/i.test(message)) {
+        setAuthMode('login');
+        setAuthNotice('Cannot complete signup until confirmation-email delivery is fixed.');
+        setErrorText(
+          'Supabase could not send the confirmation email. In Supabase Dashboard open Authentication > Providers > Email and either disable "Confirm email" for local development or configure SMTP.'
+        );
+        return;
+      }
+
+      if (authMode === 'register' && /redirect(.+)?not allowed|redirect_to/i.test(message)) {
+        setErrorText(
+          'Signup redirect is blocked. Add your app URL to Supabase Authentication URL settings (Site URL and Redirect URLs), or set VITE_AUTH_REDIRECT_TO to an allowed URL.'
+        );
+        return;
+      }
+
+      setErrorText(message);
     } finally {
       setBusy(false);
     }

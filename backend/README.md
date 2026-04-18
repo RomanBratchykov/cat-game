@@ -37,3 +37,20 @@ Then restart `npm run dev`.
 - Authentication is handled by Supabase Auth (`auth.users`).
 - The frontend joins an online room using Supabase Realtime Presence (`cat-room-main` channel).
 - Presence state is ephemeral and not permanently stored in PostgreSQL.
+
+## Troubleshooting: "Error sending confirmation email"
+
+If registration shows `Error sending confirmation email`, fix Supabase auth email settings:
+
+1. Open Supabase Dashboard -> Authentication -> Providers -> Email.
+2. For local development, disable `Confirm email` so signup returns a session immediately.
+3. Or configure SMTP in Authentication -> Settings -> SMTP if you need confirmation emails.
+4. Ensure Authentication URL settings include your app URL(s):
+   - Site URL: your primary app URL.
+   - Redirect URLs: include local dev URL (for example `http://localhost:5173`) and production URL.
+
+Optional frontend env override:
+
+- `VITE_AUTH_REDIRECT_TO=https://your-app-url.example.com`
+
+If `VITE_AUTH_REDIRECT_TO` is set, signup confirmation links will use that URL.
