@@ -17,6 +17,7 @@ import {
 import {
   createCat,
   InputComponent,
+  PhysicsComponent,
   SpineComponent,
   TransformComponent,
 } from '../entities/index.js';
@@ -43,6 +44,29 @@ const REMOTE_SNAP_DISTANCE_PX = 240;
 const REMOTE_MOVE_HOLD_MS = 220;
 const MAX_RENDER_RESOLUTION = 1.5;
 const LOCAL_STATE_EMIT_INTERVAL_MS = 90;
+const PLATFORM_THICKNESS = 14;
+const ROPE_GRAB_RADIUS_PX = 28;
+const ROPE_CLIMB_SPEED_PX = 2.5;
+const CAT_PLATFORM_HALF_WIDTH_PX = 46;
+const PLATFORM_EDGE_GRACE_PX = 5;
+const PLATFORM_STICKY_Y_TOLERANCE_PX = 8;
+const PLATFORM_LANDING_Y_TOLERANCE_PX = 12;
+const COIN_SPAWN_INTERVAL_MS = 5000;
+const COIN_MAX_ACTIVE = 10;
+const COIN_VALUE = 1;
+const COIN_PICKUP_RADIUS_PX = 28;
+const COIN_FLOAT_AMPLITUDE_PX = 4;
+const COIN_FLOAT_SPEED = 0.005;
+const MINI_GAME_EMIT_INTERVAL_MS = 220;
+const STAT_MIN = 0;
+const STAT_MAX = 100;
+const FOOD_DECAY_PER_SEC = 0.85;
+const WATER_DECAY_PER_SEC = 1.05;
+const SLEEP_DECAY_PER_SEC = 0.58;
+const FOOD_MEAL_COST = 3;
+const FOOD_MEAL_REFILL = 38;
+const WATER_REFILL = 34;
+const SLEEP_REFILL = 32;
 
 const SCENE_ROOMS = {
   courtyard: {
@@ -56,7 +80,15 @@ const SCENE_ROOMS = {
       floor: 0x24424d,
       floorLine: 0x6ea88f,
     },
-    hint: 'Move to the edge to switch rooms. Press E near objects.',
+    hint: 'Collect coins, climb ropes, and use E to refill needs.',
+    platforms: [
+      { id: 'courtyard-p1', xRatio: 0.24, yRatio: 0.67, width: 170 },
+      { id: 'courtyard-p2', xRatio: 0.56, yRatio: 0.54, width: 150 },
+      { id: 'courtyard-p3', xRatio: 0.82, yRatio: 0.71, width: 132 },
+    ],
+    ropes: [
+      { id: 'courtyard-r1', xRatio: 0.4, topRatio: 0.24, bottomRatio: 0.78 },
+    ],
     objects: [
       {
         id: 'water-bowl',
@@ -66,7 +98,17 @@ const SCENE_ROOMS = {
         height: 26,
         color: 0x8fd7ff,
         accent: 0xdff6ff,
-        interactionText: 'Fresh water unlocked. Energy restored.',
+        interactionText: 'Refreshing water! Hydration restored.',
+      },
+      {
+        id: 'food-kiosk',
+        label: 'Food Kiosk',
+        xRatio: 0.49,
+        width: 92,
+        height: 56,
+        color: 0xffb86a,
+        accent: 0xffe2b9,
+        interactionText: 'Tuna combo served.',
       },
       {
         id: 'scratch-post',
@@ -76,7 +118,7 @@ const SCENE_ROOMS = {
         height: 96,
         color: 0xce9f62,
         accent: 0xf2d8aa,
-        interactionText: 'Scratch combo! Claws are super sharp now.',
+        interactionText: 'Scratch combo! Mood boosted.',
       },
     ],
   },
@@ -91,7 +133,15 @@ const SCENE_ROOMS = {
       floor: 0x4b2f3d,
       floorLine: 0xf2b56d,
     },
-    hint: 'This room has craft toys. Press E to interact.',
+    hint: 'Use platforms for parkour routes and gather coins.',
+    platforms: [
+      { id: 'workshop-p1', xRatio: 0.21, yRatio: 0.62, width: 166 },
+      { id: 'workshop-p2', xRatio: 0.5, yRatio: 0.48, width: 148 },
+      { id: 'workshop-p3', xRatio: 0.79, yRatio: 0.64, width: 164 },
+    ],
+    ropes: [
+      { id: 'workshop-r1', xRatio: 0.65, topRatio: 0.22, bottomRatio: 0.74 },
+    ],
     objects: [
       {
         id: 'yarn-basket',
@@ -101,7 +151,7 @@ const SCENE_ROOMS = {
         height: 48,
         color: 0xe88fc7,
         accent: 0xffdaef,
-        interactionText: 'Yarn mission started. Roll speed increased.',
+        interactionText: 'Yarn mission started. Bonus coins nearby.',
       },
       {
         id: 'nap-pillow',
@@ -111,7 +161,7 @@ const SCENE_ROOMS = {
         height: 30,
         color: 0x8f96d6,
         accent: 0xe1e5ff,
-        interactionText: 'Soft nap complete. Mood meter is full.',
+        interactionText: 'Soft nap complete. Sleep restored.',
       },
     ],
   },
@@ -126,7 +176,16 @@ const SCENE_ROOMS = {
       floor: 0x1f3159,
       floorLine: 0x9ac0ff,
     },
-    hint: 'Watch stars and test gadgets. Press E to interact.',
+    hint: 'Climb ropes to reach coins and keep all needs healthy.',
+    platforms: [
+      { id: 'observatory-p1', xRatio: 0.22, yRatio: 0.69, width: 142 },
+      { id: 'observatory-p2', xRatio: 0.53, yRatio: 0.52, width: 172 },
+      { id: 'observatory-p3', xRatio: 0.82, yRatio: 0.61, width: 152 },
+    ],
+    ropes: [
+      { id: 'observatory-r1', xRatio: 0.36, topRatio: 0.21, bottomRatio: 0.76 },
+      { id: 'observatory-r2', xRatio: 0.73, topRatio: 0.19, bottomRatio: 0.71 },
+    ],
     objects: [
       {
         id: 'telescope',
@@ -136,7 +195,7 @@ const SCENE_ROOMS = {
         height: 70,
         color: 0x90a9ff,
         accent: 0xe5eeff,
-        interactionText: 'Star trail discovered. New route marked.',
+        interactionText: 'Star trail discovered. Cozy rest vibe.',
       },
       {
         id: 'radio-console',
@@ -146,11 +205,15 @@ const SCENE_ROOMS = {
         height: 54,
         color: 0x6fcad4,
         accent: 0xd9fafd,
-        interactionText: 'Beacon online. Teammates can find you faster.',
+        interactionText: 'Beacon online. Hydration station synced.',
       },
     ],
   },
 };
+
+function clampStat(value) {
+  return Math.max(STAT_MIN, Math.min(STAT_MAX, value));
+}
 
 function getSceneRoom(roomId) {
   if (typeof roomId === 'string' && SCENE_ROOMS[roomId]) {
@@ -182,6 +245,9 @@ export class Game {
     this._onInteract = typeof options.onInteract === 'function'
       ? options.onInteract
       : null;
+    this._onMiniGameState = typeof options.onMiniGameState === 'function'
+      ? options.onMiniGameState
+      : null;
     this._showRemoteAcrossRooms = options.showRemoteAcrossRooms === true;
     this._emitStateEveryMs = LOCAL_STATE_EMIT_INTERVAL_MS;
     this._emitStateClock = 0;
@@ -194,9 +260,25 @@ export class Game {
     this._skeletonData = null;
     this._sceneRoomId = DEFAULT_SCENE_ROOM;
     this._sceneObjects = [];
+    this._scenePlatforms = [];
+    this._sceneRopes = [];
     this._lastSceneTransitionAt = 0;
     this._interactConsumed = false;
     this._sceneObjectLayer = null;
+    this._coinLayer = null;
+    this._coins = [];
+    this._coinIdCounter = 0;
+    this._lastCoinSpawnAt = Date.now();
+    this._activeRopeId = null;
+    this._activePlatformId = null;
+    this._lastCatY = CONFIG.FLOOR_Y;
+    this._economy = {
+      wallet: 0,
+      food: 78,
+      water: 82,
+      sleep: 75,
+    };
+    this._lastMiniGameEmitAt = 0;
 
     const renderResolution = Math.min(window.devicePixelRatio || 1, MAX_RENDER_RESOLUTION);
     const isCoarsePointer = window.matchMedia?.('(pointer: coarse)')?.matches || false;
@@ -222,6 +304,8 @@ export class Game {
 
     this._sceneObjectLayer = new PIXI.Container();
     this._app.stage.addChild(this._sceneObjectLayer);
+    this._coinLayer = new PIXI.Container();
+    this._app.stage.addChild(this._coinLayer);
     this._renderSceneObjects();
     this._emitSceneChanged();
 
@@ -264,6 +348,7 @@ export class Game {
         this._app.ticker.add((delta) => {
           this._world.tick(delta);
           this._updateSceneFlow();
+          this._tickMiniGame(this._app.ticker.elapsedMS);
           this._tickLocalState();
           this._tickRemotePlayers();
         });
@@ -282,6 +367,7 @@ export class Game {
           this._pendingRemotePlayers = [];
         }
 
+        this._emitMiniGameState(true);
         this._onResize();
       });
   }
@@ -305,6 +391,11 @@ export class Game {
     this._app.renderer.resize(CONFIG.WIDTH, CONFIG.HEIGHT);
     this._drawBackground();
     this._renderSceneObjects();
+    this._clearCoins();
+    this._lastCoinSpawnAt = Date.now();
+    this._activeRopeId = null;
+    this._activePlatformId = null;
+    this._emitMiniGameState(true);
   }
 
   // parts: { head?: HTMLCanvasElement, body?: ..., leg?: ..., tail?: ... }
@@ -443,10 +534,15 @@ export class Game {
 
     this._sceneRoomId = nextScene.id;
     this._lastSceneTransitionAt = Date.now();
+    this._activeRopeId = null;
+    this._activePlatformId = null;
     this._drawBackground();
     this._renderSceneObjects();
+    this._clearCoins();
+    this._lastCoinSpawnAt = Date.now();
     this._refreshRemoteVisibility();
     this._emitSceneChanged();
+    this._emitMiniGameState(true);
 
     if (!this._catEntity) return;
 
@@ -471,9 +567,64 @@ export class Game {
     });
 
     const scene = getSceneRoom(this._sceneRoomId);
+    this._scenePlatforms = (scene.platforms || []).map((platform) => {
+      const x = Math.round(CONFIG.WIDTH * platform.xRatio);
+      const y = Math.round(CONFIG.HEIGHT * platform.yRatio);
+      const width = Math.max(82, Math.round(platform.width || 130));
+      const halfW = width / 2;
+
+      const body = new PIXI.Graphics();
+      body.beginFill(0x2a415f, 0.96);
+      body.drawRoundedRect(-halfW, -PLATFORM_THICKNESS / 2, width, PLATFORM_THICKNESS, 8);
+      body.endFill();
+      body.lineStyle(2, 0x9ed8ff, 0.85);
+      body.moveTo(-halfW + 6, -2);
+      body.lineTo(halfW - 6, -2);
+      body.x = x;
+      body.y = y;
+      this._sceneObjectLayer.addChild(body);
+
+      return {
+        id: platform.id,
+        x,
+        y,
+        width,
+        x1: x - halfW,
+        x2: x + halfW,
+      };
+    });
+
+    this._sceneRopes = (scene.ropes || []).map((rope) => {
+      const x = Math.round(CONFIG.WIDTH * rope.xRatio);
+      const topY = Math.round(CONFIG.HEIGHT * rope.topRatio);
+      const bottomY = Math.round(CONFIG.HEIGHT * rope.bottomRatio);
+
+      const ropeGfx = new PIXI.Graphics();
+      ropeGfx.lineStyle(5, 0xdbc594, 0.92);
+      ropeGfx.moveTo(x, topY);
+      ropeGfx.lineTo(x, bottomY);
+      ropeGfx.lineStyle(2, 0x8c6f43, 0.72);
+      ropeGfx.moveTo(x - 4, topY + 4);
+      ropeGfx.lineTo(x + 4, bottomY - 4);
+      ropeGfx.beginFill(0xfff3d2, 0.88);
+      ropeGfx.drawCircle(x, topY, 5);
+      ropeGfx.drawCircle(x, bottomY, 5);
+      ropeGfx.endFill();
+      this._sceneObjectLayer.addChild(ropeGfx);
+
+      return {
+        id: rope.id,
+        x,
+        topY,
+        bottomY,
+      };
+    });
+
     this._sceneObjects = scene.objects.map((item) => {
       const x = Math.round(CONFIG.WIDTH * item.xRatio);
-      const y = CONFIG.FLOOR_Y;
+      const y = Number.isFinite(item.yRatio)
+        ? Math.round(CONFIG.HEIGHT * item.yRatio)
+        : CONFIG.FLOOR_Y;
 
       const container = new PIXI.Container();
       container.x = x;
@@ -538,7 +689,10 @@ export class Game {
     if (!this._catEntity || !this._inputSystem) return;
 
     const tf = this._catEntity.get(TransformComponent);
-    if (!tf) return;
+    const phys = this._catEntity.get(PhysicsComponent);
+    if (!tf || !phys) return;
+
+    this._applyPlatformAndRopePhysics(this._app?.ticker?.elapsedMS || 16.67);
 
     const scene = getSceneRoom(this._sceneRoomId);
     const now = Date.now();
@@ -566,15 +720,375 @@ export class Game {
     if (!nearby || !interactPressed || this._interactConsumed) return;
 
     this._interactConsumed = true;
-    this.setLocalChatBubble(nearby.interactionText);
+    const interactionResult = this._applyInteractionReward(nearby);
+    const message = interactionResult?.message || nearby.interactionText;
+
+    this.setLocalChatBubble(message);
+    if (interactionResult?.changed) {
+      this._emitMiniGameState(true);
+    }
+
     if (this._onInteract) {
       this._onInteract({
         roomId: this._sceneRoomId,
         objectId: nearby.id,
         label: nearby.label,
-        message: nearby.interactionText,
+        message,
       });
     }
+  }
+
+  _findClosestRope(tf) {
+    let closest = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (const rope of this._sceneRopes) {
+      const clampedY = Math.max(rope.topY, Math.min(rope.bottomY, tf.y));
+      const dx = Math.abs(rope.x - tf.x);
+      const dy = Math.abs(clampedY - tf.y);
+      const distance = Math.hypot(dx, dy);
+      if (distance >= bestDistance) continue;
+      closest = rope;
+      bestDistance = distance;
+    }
+
+    return closest;
+  }
+
+  _isWithinPlatformSupport(platform, tf) {
+    const feetLeft = tf.x - CAT_PLATFORM_HALF_WIDTH_PX;
+    const feetRight = tf.x + CAT_PLATFORM_HALF_WIDTH_PX;
+    return feetRight >= platform.x1 + PLATFORM_EDGE_GRACE_PX
+      && feetLeft <= platform.x2 - PLATFORM_EDGE_GRACE_PX;
+  }
+
+  _applyPlatformAndRopePhysics(elapsedMs = 16.67) {
+    if (!this._catEntity || !this._inputSystem) return;
+
+    const tf = this._catEntity.get(TransformComponent);
+    const phys = this._catEntity.get(PhysicsComponent);
+    if (!tf || !phys) return;
+
+    const dtScale = Math.max(0.5, Math.min(2.4, Number(elapsedMs || 16.67) / 16.67));
+    const prevY = Number.isFinite(this._lastCatY) ? this._lastCatY : tf.y;
+    const climbUp = this._inputSystem.isDown('KeyW') || this._inputSystem.isDown('ArrowUp');
+    const climbDown = this._inputSystem.isDown('KeyS') || this._inputSystem.isDown('ArrowDown');
+    const jumpPressed = this._inputSystem.isDown('Space');
+    const movingHorizontal = this._inputSystem.isLeft() || this._inputSystem.isRight();
+
+    const activePlatform = this._scenePlatforms.find((platform) => platform.id === this._activePlatformId) || null;
+
+    if (activePlatform && !this._isWithinPlatformSupport(activePlatform, tf)) {
+      this._activePlatformId = null;
+    }
+
+    let activeRope = this._sceneRopes.find((rope) => rope.id === this._activeRopeId) || null;
+    if (this._activeRopeId && !activeRope) {
+      this._activeRopeId = null;
+    }
+
+    if (!activeRope && climbUp) {
+      const candidate = this._findClosestRope(tf);
+      if (
+        candidate
+        && Math.abs(candidate.x - tf.x) <= ROPE_GRAB_RADIUS_PX
+        && tf.y >= candidate.topY - 20
+        && tf.y <= candidate.bottomY + 20
+      ) {
+        this._activeRopeId = candidate.id;
+        activeRope = candidate;
+      }
+    }
+
+    if (activeRope) {
+      if (jumpPressed || movingHorizontal) {
+        this._activeRopeId = null;
+        this._activePlatformId = null;
+        phys.onGround = false;
+        if (jumpPressed) {
+          phys.vy = -CONFIG.JUMP_FORCE_VERTICAL * 0.65;
+        }
+      } else {
+        if (climbUp && !climbDown) {
+          tf.y -= ROPE_CLIMB_SPEED_PX * dtScale;
+        } else if (climbDown && !climbUp) {
+          tf.y += ROPE_CLIMB_SPEED_PX * dtScale;
+        }
+
+        tf.x = activeRope.x;
+        tf.y = Math.max(activeRope.topY, Math.min(activeRope.bottomY, tf.y));
+        phys.vx = 0;
+        phys.vy = 0;
+        phys.onGround = true;
+        this._lastCatY = tf.y;
+        return;
+      }
+    }
+
+    const supportPlatform = this._scenePlatforms.find((platform) => {
+      if (!this._isWithinPlatformSupport(platform, tf)) return false;
+      const deltaY = Math.abs(tf.y - platform.y);
+      return deltaY <= PLATFORM_STICKY_Y_TOLERANCE_PX + Math.max(0, phys.vy);
+    });
+
+    if (supportPlatform && !jumpPressed) {
+      this._activePlatformId = supportPlatform.id;
+      tf.y = supportPlatform.y;
+      phys.vy = 0;
+      phys.onGround = true;
+      this._lastCatY = tf.y;
+      return;
+    }
+
+    let landedOnPlatform = false;
+    if (phys.vy >= 0) {
+      for (const platform of this._scenePlatforms) {
+        const withinX = this._isWithinPlatformSupport(platform, tf);
+        const crossedTop = prevY <= platform.y && tf.y >= platform.y;
+        const nearTop = Math.abs(tf.y - platform.y)
+          <= PLATFORM_LANDING_Y_TOLERANCE_PX + Math.max(0, Math.abs(phys.vy));
+
+        if (!withinX || (!crossedTop && !(nearTop && prevY <= platform.y + 8))) continue;
+
+        tf.y = platform.y;
+        phys.vy = 0;
+        phys.onGround = true;
+        this._activePlatformId = platform.id;
+        landedOnPlatform = true;
+        break;
+      }
+    }
+
+    if (!landedOnPlatform && tf.y < CONFIG.FLOOR_Y - 1) {
+      phys.onGround = false;
+      this._activePlatformId = null;
+    }
+
+    if (tf.y >= CONFIG.FLOOR_Y - 1) {
+      this._activePlatformId = null;
+    }
+
+    this._lastCatY = tf.y;
+  }
+
+  _buildMiniGameStatus() {
+    const { food, water, sleep, wallet } = this._economy;
+    if (food <= 0 || water <= 0 || sleep <= 0) {
+      return 'Critical needs! Refill now or your kitten will collapse.';
+    }
+
+    if (food < 20 || water < 20 || sleep < 20) {
+      return 'Needs are low. Find food, water, and rest.';
+    }
+
+    if (wallet < FOOD_MEAL_COST) {
+      return 'Collect coins to buy meals at Food Kiosk.';
+    }
+
+    return 'Parkour for coins and keep food/water/sleep balanced.';
+  }
+
+  _emitMiniGameState(force = false) {
+    if (!this._onMiniGameState) return;
+
+    const now = Date.now();
+    if (!force && now - this._lastMiniGameEmitAt < MINI_GAME_EMIT_INTERVAL_MS) return;
+    this._lastMiniGameEmitAt = now;
+
+    this._onMiniGameState({
+      wallet: this._economy.wallet,
+      food: Math.round(this._economy.food),
+      water: Math.round(this._economy.water),
+      sleep: Math.round(this._economy.sleep),
+      coinsOnMap: this._coins.length,
+      status: this._buildMiniGameStatus(),
+    });
+  }
+
+  _refillNeed(statKey, amount) {
+    const prev = this._economy[statKey];
+    this._economy[statKey] = clampStat(prev + amount);
+    return this._economy[statKey] - prev;
+  }
+
+  _buyMeal(cost, refill) {
+    if (this._economy.food >= 99) {
+      return {
+        changed: false,
+        message: 'You are already full. Save your coins.',
+      };
+    }
+
+    if (this._economy.wallet < cost) {
+      return {
+        changed: false,
+        message: `Need ${cost} coins for food. Wallet: ${this._economy.wallet}.`,
+      };
+    }
+
+    this._economy.wallet -= cost;
+    const filledBy = this._refillNeed('food', refill);
+    return {
+      changed: true,
+      message: `Ate a meal for ${cost} coins. Food +${Math.round(filledBy)}.`,
+    };
+  }
+
+  _applyInteractionReward(nearby) {
+    switch (nearby.id) {
+      case 'food-kiosk':
+        return this._buyMeal(FOOD_MEAL_COST, FOOD_MEAL_REFILL);
+      case 'water-bowl':
+      case 'radio-console': {
+        if (this._economy.water >= 99) {
+          return { changed: false, message: 'Water is already full.' };
+        }
+        const gain = this._refillNeed('water', WATER_REFILL);
+        return { changed: true, message: `Hydration +${Math.round(gain)}.` };
+      }
+      case 'nap-pillow':
+      case 'telescope': {
+        if (this._economy.sleep >= 99) {
+          return { changed: false, message: 'Sleep is already full.' };
+        }
+        const gain = this._refillNeed('sleep', SLEEP_REFILL);
+        return { changed: true, message: `Rest +${Math.round(gain)} sleep.` };
+      }
+      default:
+        return {
+          changed: false,
+          message: nearby.interactionText,
+        };
+    }
+  }
+
+  _getCoinSpawnPoint() {
+    const candidates = [];
+
+    this._scenePlatforms.forEach((platform) => {
+      const innerWidth = Math.max(20, platform.width - 36);
+      const left = platform.x - innerWidth / 2;
+      const x = Math.round(left + Math.random() * innerWidth);
+      candidates.push({
+        x,
+        y: platform.y - 18,
+      });
+    });
+
+    const minX = 32;
+    const maxX = Math.max(minX + 60, CONFIG.WIDTH - 32);
+    candidates.push({
+      x: Math.round(minX + Math.random() * (maxX - minX)),
+      y: CONFIG.FLOOR_Y - 20,
+    });
+
+    return candidates[Math.floor(Math.random() * candidates.length)] || null;
+  }
+
+  _spawnCoin() {
+    if (!this._coinLayer || this._coins.length >= COIN_MAX_ACTIVE) return false;
+
+    const spawn = this._getCoinSpawnPoint();
+    if (!spawn) return false;
+
+    const gfx = new PIXI.Graphics();
+    gfx.beginFill(0xffda57, 0.96);
+    gfx.drawCircle(0, 0, 10);
+    gfx.endFill();
+    gfx.lineStyle(2, 0xfff4bf, 0.95);
+    gfx.drawCircle(0, 0, 10);
+    gfx.beginFill(0xfff9d8, 0.85);
+    gfx.drawCircle(-3, -3, 3);
+    gfx.endFill();
+    gfx.x = spawn.x;
+    gfx.y = spawn.y;
+    this._coinLayer.addChild(gfx);
+
+    this._coins.push({
+      id: `coin-${this._coinIdCounter += 1}`,
+      x: spawn.x,
+      baseY: spawn.y,
+      value: COIN_VALUE,
+      phase: Math.random() * Math.PI * 2,
+      gfx,
+    });
+
+    return true;
+  }
+
+  _clearCoins() {
+    this._coins.forEach((coin) => {
+      coin.gfx?.parent?.removeChild(coin.gfx);
+      coin.gfx?.destroy({ children: true, texture: false, baseTexture: false });
+    });
+    this._coins = [];
+  }
+
+  _collectNearbyCoins(tf) {
+    let collected = 0;
+
+    for (let index = this._coins.length - 1; index >= 0; index -= 1) {
+      const coin = this._coins[index];
+      const dy = coin.gfx?.y ?? coin.baseY;
+      const distance = Math.hypot(tf.x - coin.x, tf.y - dy);
+      if (distance > COIN_PICKUP_RADIUS_PX) continue;
+
+      this._economy.wallet += coin.value;
+      coin.gfx?.parent?.removeChild(coin.gfx);
+      coin.gfx?.destroy({ children: true, texture: false, baseTexture: false });
+      this._coins.splice(index, 1);
+      collected += 1;
+    }
+
+    return collected;
+  }
+
+  _tickMiniGame(elapsedMs = 16.67) {
+    if (!this._catEntity) return;
+
+    const tf = this._catEntity.get(TransformComponent);
+    if (!tf) return;
+
+    const elapsed = Number(elapsedMs) || 16.67;
+    const dt = Math.max(0.001, elapsed / 1000);
+
+    this._economy.food = clampStat(this._economy.food - FOOD_DECAY_PER_SEC * dt);
+    this._economy.water = clampStat(this._economy.water - WATER_DECAY_PER_SEC * dt);
+    this._economy.sleep = clampStat(this._economy.sleep - SLEEP_DECAY_PER_SEC * dt);
+
+    const now = Date.now();
+    if (now - this._lastCoinSpawnAt >= COIN_SPAWN_INTERVAL_MS) {
+      this._lastCoinSpawnAt = now;
+      const spawned = this._spawnCoin();
+      if (spawned) {
+        this._emitMiniGameState(true);
+      }
+    }
+
+    this._coins.forEach((coin) => {
+      coin.phase += elapsed * COIN_FLOAT_SPEED;
+      if (coin.gfx) {
+        coin.gfx.y = coin.baseY + Math.sin(coin.phase) * COIN_FLOAT_AMPLITUDE_PX;
+      }
+    });
+
+    const collectedCoins = this._collectNearbyCoins(tf);
+    if (collectedCoins > 0) {
+      const pickupMessage = `+${collectedCoins} coin${collectedCoins > 1 ? 's' : ''}. Wallet: ${this._economy.wallet}`;
+      this.setLocalChatBubble(pickupMessage);
+      if (this._onInteract) {
+        this._onInteract({
+          roomId: this._sceneRoomId,
+          objectId: 'coin',
+          label: 'Coin',
+          message: pickupMessage,
+          personalOnly: true,
+        });
+      }
+      this._emitMiniGameState(true);
+    }
+
+    this._emitMiniGameState();
   }
 
   _refreshRemoteVisibility() {
@@ -843,6 +1357,7 @@ export class Game {
     }
     this._remotePlayers.clear();
     this._pendingRemoteSkins.clear();
+    this._clearCoins();
 
     this._world.destroy();
     this._app.destroy(true, { children: true, texture: true });

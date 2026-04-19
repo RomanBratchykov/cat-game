@@ -251,6 +251,15 @@ const App = () => {
     title: 'Courtyard',
     hint: 'Move to room edges and press E near objects.',
   });
+  const [miniGameState, setMiniGameState] = useState({
+    wallet: 0,
+    food: 78,
+    water: 82,
+    sleep: 75,
+    coinsOnMap: 0,
+    status: 'Collect coins and keep your kitten healthy.',
+  });
+  const [personalNotice, setPersonalNotice] = useState('');
 
   const canvasRef = useRef(null);
   const gameRef = useRef(null);
@@ -270,6 +279,7 @@ const App = () => {
   const chatInputRef = useRef(null);
   const tabIdRef = useRef(createTabId());
   const roomLinkResetTimerRef = useRef(null);
+  const personalNoticeTimerRef = useRef(null);
   const screenRef = useRef(SCREEN.LOADING);
   const userRef = useRef(null);
   const lastLoadedUserRef = useRef(null);
@@ -372,6 +382,22 @@ const App = () => {
       const next = [...prev, item];
       return next.length > CHAT_POOL_LIMIT ? next.slice(next.length - CHAT_POOL_LIMIT) : next;
     });
+  }, []);
+
+  const showPersonalNotice = useCallback((message) => {
+    const text = String(message || '').trim();
+    if (!text) return;
+
+    setPersonalNotice(text);
+
+    if (personalNoticeTimerRef.current) {
+      clearTimeout(personalNoticeTimerRef.current);
+    }
+
+    personalNoticeTimerRef.current = setTimeout(() => {
+      setPersonalNotice('');
+      personalNoticeTimerRef.current = null;
+    }, 2200);
   }, []);
 
   const speakChatMessage = useCallback((sender, message) => {
@@ -696,6 +722,14 @@ const App = () => {
       if (!roomLinkResetTimerRef.current) return;
       clearTimeout(roomLinkResetTimerRef.current);
       roomLinkResetTimerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (!personalNoticeTimerRef.current) return;
+      clearTimeout(personalNoticeTimerRef.current);
+      personalNoticeTimerRef.current = null;
     };
   }, []);
 
@@ -1072,17 +1106,24 @@ const App = () => {
           hint,
         });
       },
+      onMiniGameState: (nextState) => {
+        if (!nextState || typeof nextState !== 'object') return;
+
+        setMiniGameState((prev) => ({
+          ...prev,
+          wallet: Number.isFinite(nextState.wallet) ? nextState.wallet : prev.wallet,
+          food: Number.isFinite(nextState.food) ? nextState.food : prev.food,
+          water: Number.isFinite(nextState.water) ? nextState.water : prev.water,
+          sleep: Number.isFinite(nextState.sleep) ? nextState.sleep : prev.sleep,
+          coinsOnMap: Number.isFinite(nextState.coinsOnMap) ? nextState.coinsOnMap : prev.coinsOnMap,
+          status: typeof nextState.status === 'string' && nextState.status
+            ? nextState.status
+            : prev.status,
+        }));
+      },
       onInteract: (payload) => {
         if (!payload?.message) return;
-        appendChatMessage({
-          id: `world-${Date.now()}`,
-          sender: 'World',
-          connectionKey: 'world',
-          connectionLabel: 'World',
-          message: payload.message,
-          mine: false,
-          at: Date.now(),
-        });
+        showPersonalNotice(payload.message);
       },
     });
 
@@ -1096,7 +1137,7 @@ const App = () => {
         gameRef.current = null;
       }
     };
-  }, [appendChatMessage, requestRealtimeRestart, screen]);
+  }, [requestRealtimeRestart, screen, showPersonalNotice]);
 
   useEffect(() => {
     if (!gameRef.current || !skinCanvases) return;
@@ -1631,6 +1672,11 @@ const App = () => {
     remoteUserByPresenceRef.current.clear();
     remoteSkinSignatureRef.current.clear();
     pendingSkinRequestAtRef.current.clear();
+    setPersonalNotice('');
+    if (personalNoticeTimerRef.current) {
+      clearTimeout(personalNoticeTimerRef.current);
+      personalNoticeTimerRef.current = null;
+    }
   }, [screen]);
 
   const roomWrapperStyle = useMemo(() => {
@@ -1799,6 +1845,13 @@ const App = () => {
             You are {catRecord?.name || 'My Cat'} | Online: {onlineCount}
           </p>
           <p style={styles.sceneHint}>{sceneInfo.hint}</p>
+          <div style={styles.miniStatRow}>
+            <span style={styles.miniStatChip}>🪙 {miniGameState.wallet}</span>
+            <span style={styles.miniStatChip}>🍖 {miniGameState.food}</span>
+            <span style={styles.miniStatChip}>💧 {miniGameState.water}</span>
+            <span style={styles.miniStatChip}>💤 {miniGameState.sleep}</span>
+          </div>
+          {personalNotice ? <p style={styles.personalNotice}>{personalNotice}</p> : null}
         </div>
 
         <div style={styles.roomActions}>
@@ -2170,6 +2223,29 @@ const styles = {
     fontSize: 12,
     color: 'rgba(208, 245, 255, 0.78)',
   },
+  miniStatRow: {
+    marginTop: 8,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    flexWrap: 'wrap',
+  },
+  miniStatChip: {
+    borderRadius: 999,
+    border: '1px solid rgba(255,255,255,0.25)',
+    background: 'rgba(10, 24, 39, 0.65)',
+    color: '#ecf9ff',
+    fontSize: 12,
+    fontWeight: 700,
+    padding: '4px 10px',
+    letterSpacing: '0.01em',
+    fontVariantNumeric: 'tabular-nums',
+  },
+  personalNotice: {
+    margin: '8px 0 0 0',
+    fontSize: 12,
+    color: '#ffe7b4',
+  },
   roomActions: {
     display: 'flex',
     gap: 8,
@@ -2223,6 +2299,84 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     gap: 12,
+  },
+  kittenGamePanel: {
+    border: '1px solid rgba(255,255,255,0.16)',
+    borderRadius: 10,
+    background: 'rgba(6, 18, 30, 0.72)',
+    padding: '10px 12px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+  },
+  kittenGameTopRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  kittenGameTitle: {
+    fontSize: 14,
+    color: '#effaff',
+    letterSpacing: '0.02em',
+  },
+  kittenWalletBadge: {
+    fontSize: 12,
+    border: '1px solid rgba(255, 228, 155, 0.54)',
+    background: 'rgba(146, 111, 33, 0.24)',
+    color: '#ffe9bd',
+    borderRadius: 999,
+    padding: '4px 10px',
+    fontWeight: 700,
+  },
+  kittenGameStatus: {
+    margin: 0,
+    fontSize: 12,
+    color: 'rgba(218, 246, 255, 0.84)',
+  },
+  kittenMeterRow: {
+    display: 'grid',
+    gridTemplateColumns: '60px minmax(0, 1fr) 44px',
+    alignItems: 'center',
+    gap: 8,
+  },
+  kittenMeterLabel: {
+    fontSize: 12,
+    color: '#dff5ff',
+    fontWeight: 700,
+  },
+  kittenMeterTrack: {
+    borderRadius: 999,
+    height: 10,
+    background: 'rgba(255,255,255,0.12)',
+    border: '1px solid rgba(255,255,255,0.18)',
+    overflow: 'hidden',
+  },
+  kittenMeterFill: {
+    height: '100%',
+    borderRadius: 999,
+    transition: 'width 180ms ease',
+  },
+  kittenMeterFood: {
+    background: 'linear-gradient(90deg, #ffb061, #ffd07f)',
+  },
+  kittenMeterWater: {
+    background: 'linear-gradient(90deg, #69bfff, #90ecff)',
+  },
+  kittenMeterSleep: {
+    background: 'linear-gradient(90deg, #b59dff, #dccbff)',
+  },
+  kittenMeterValue: {
+    fontSize: 12,
+    color: '#e9f9ff',
+    textAlign: 'right',
+    fontVariantNumeric: 'tabular-nums',
+  },
+  kittenGameSubHint: {
+    margin: 0,
+    fontSize: 11,
+    color: 'rgba(191, 229, 242, 0.72)',
   },
   canvasWrapper: {
     border: '1px solid rgba(255,255,255,0.1)',
