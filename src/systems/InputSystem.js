@@ -20,6 +20,7 @@ export class InputSystem extends System {
     super();
     this.keys          = new Set();
     this._ctrlConsumed = false;
+    this._enabled      = true;
 
     // Прив'язуємо методи щоб removeEventListener працював
     this._onKeyDown = this._onKeyDown.bind(this);
@@ -33,7 +34,10 @@ export class InputSystem extends System {
     // Мобільні кнопки викликають ці функції напряму
     // Вони записують в той самий keys Set — система не бачить різниці
     window.__catVirtualKeys = {
-      pressKey:   (code) => this.keys.add(code),
+      pressKey:   (code) => {
+        if (!this._enabled) return;
+        this.keys.add(code);
+      },
       releaseKey: (code) => this.keys.delete(code),
     };
 
@@ -50,6 +54,8 @@ export class InputSystem extends System {
   }
 
   update() {
+    if (!this._enabled) return;
+
     // Знаходимо всі entities що реагують на ввід (тільки кіт зараз)
     const entities = this.world.query(InputComponent);
 
@@ -72,16 +78,51 @@ export class InputSystem extends System {
 
   // Чи натиснута клавіша — викликається з інших систем
   isDown(code) {
-    return this.keys.has(code);
+    return this._enabled && this.keys.has(code);
   }
 
-  isLeft()  { return this.keys.has('KeyA')  || this.keys.has('ArrowLeft');  }
-  isRight() { return this.keys.has('KeyD')  || this.keys.has('ArrowRight'); }
-  isJump()  { return this.keys.has('KeyW')  || this.keys.has('Space') || this.keys.has('ArrowUp'); }
+  isLeft()  { return this._enabled && (this.keys.has('KeyA')  || this.keys.has('ArrowLeft')); }
+  isRight() { return this._enabled && (this.keys.has('KeyD')  || this.keys.has('ArrowRight')); }
+  isJump()  { return this._enabled && (this.keys.has('KeyW')  || this.keys.has('Space') || this.keys.has('ArrowUp')); }
+
+  setEnabled(nextEnabled) {
+    const enabled = Boolean(nextEnabled);
+    if (this._enabled === enabled) return;
+
+    this._enabled = enabled;
+
+    if (!this._enabled) {
+      this.keys.clear();
+      this._ctrlConsumed = false;
+    }
+  }
 
   _onKeyDown(e) {
+    const target = e?.target;
+    const isEditable = Boolean(
+      target && (
+        target.tagName === 'INPUT'
+        || target.tagName === 'TEXTAREA'
+        || target.isContentEditable
+      )
+    );
+
+    if (isEditable || !this._enabled) {
+      return;
+    }
+
     this.keys.add(e.code);
-    if (e.ctrlKey) e.preventDefault();
+
+    if (
+      e.ctrlKey
+      || e.code === 'Space'
+      || e.code === 'ArrowUp'
+      || e.code === 'ArrowDown'
+      || e.code === 'ArrowLeft'
+      || e.code === 'ArrowRight'
+    ) {
+      e.preventDefault();
+    }
   }
 
   _onKeyUp(e) {

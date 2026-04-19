@@ -5,6 +5,7 @@ import { CONFIG } from './config.js';
 import { isSupabaseConfigured, supabase } from './lib/supabaseClient.js';
 import { catRecordToEditorInitial, ensureProfile, getMyCat, saveMyCat } from './lib/catPersistence.js';
 import { buildSkinCanvasesFromCat, canvasesToDataUrls, dataUrlsToCanvases } from './lib/catSkin.js';
+import { createChatVoiceover } from './lib/chatVoiceover.js';
 
 const SCREEN = {
   LOADING: 'loading',
@@ -16,7 +17,6 @@ const SCREEN = {
 
 const CHAT_MAX_LENGTH = 120;
 const CHAT_POOL_LIMIT = 40;
-const CONNECTION_CHAT_HISTORY_LIMIT = 16;
 const PRESENCE_STALE_AFTER_MS = 15000;
 const REMOTE_BROADCAST_STALE_AFTER_MS = 20000;
 const PRESENCE_TRACK_INTERVAL_MS = 1400;
@@ -243,6 +243,8 @@ const App = () => {
   const [roomLinkCopied, setRoomLinkCopied] = useState(false);
   const [joystickOffset, setJoystickOffset] = useState({ x: 0, y: 0 });
   const [musicBlocked, setMusicBlocked] = useState(false);
+  const [chatVoiceEnabled, setChatVoiceEnabled] = useState(true);
+  const [chatVoiceSupported, setChatVoiceSupported] = useState(true);
   const [realtimeRestartNonce, setRealtimeRestartNonce] = useState(0);
   const [sceneInfo, setSceneInfo] = useState({
     id: DEFAULT_SCENE_ROOM,
@@ -262,6 +264,7 @@ const App = () => {
   const remoteSkinSignatureRef = useRef(new Map());
   const remoteUserByPresenceRef = useRef(new Map());
   const pendingSkinRequestAtRef = useRef(new Map());
+  const chatVoiceRef = useRef(null);
   const broadcastPlayersByPresenceRef = useRef(new Map());
   const broadcastFlushTimerRef = useRef(null);
   const chatInputRef = useRef(null);
@@ -368,6 +371,15 @@ const App = () => {
     setChatMessages((prev) => {
       const next = [...prev, item];
       return next.length > CHAT_POOL_LIMIT ? next.slice(next.length - CHAT_POOL_LIMIT) : next;
+    });
+  }, []);
+
+  const speakChatMessage = useCallback((sender, message) => {
+    const voiceover = chatVoiceRef.current;
+    if (!voiceover) return;
+
+    voiceover.speakChatLine({ sender, message }).catch((error) => {
+      console.warn('[Voice] Failed to speak chat line', error?.message || error);
     });
   }, []);
 
@@ -696,6 +708,36 @@ const App = () => {
   }, [user]);
 
   useEffect(() => {
+    const voiceover = createChatVoiceover();
+    chatVoiceRef.current = voiceover;
+    setChatVoiceSupported(voiceover.isSupported);
+
+    return () => {
+      voiceover.stop();
+      if (chatVoiceRef.current === voiceover) {
+        chatVoiceRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const voiceover = chatVoiceRef.current;
+    if (!voiceover) return;
+
+    voiceover.setEnabled(chatVoiceEnabled);
+    if (chatVoiceEnabled) {
+      voiceover.prime().catch((error) => {
+        console.warn('[Voice] Failed to initialize voiceover', error?.message || error);
+      });
+    }
+  }, [chatVoiceEnabled]);
+
+  useEffect(() => {
+    if (screen === SCREEN.ROOM) return;
+    chatVoiceRef.current?.stop();
+  }, [screen]);
+
+  useEffect(() => {
     if (screen === SCREEN.EDITOR) {
       setThemeAudio(THEME_TRACKS.editor);
       return;
@@ -712,6 +754,11 @@ const App = () => {
   useEffect(() => {
     const unlockAudio = () => {
       tryResumeThemeAudio();
+
+      if (!chatVoiceEnabled) return;
+      chatVoiceRef.current?.prime().catch(() => {
+        // Ignore unlock errors. Voice may still work after the next user interaction.
+      });
     };
 
     window.addEventListener('click', unlockAudio, { passive: true });
@@ -727,7 +774,7 @@ const App = () => {
       window.removeEventListener('pointerdown', unlockAudio);
       window.removeEventListener('keydown', unlockAudio);
     };
-  }, [tryResumeThemeAudio]);
+  }, [chatVoiceEnabled, tryResumeThemeAudio]);
 
   useEffect(() => {
     return () => {
@@ -1039,6 +1086,8 @@ const App = () => {
       },
     });
 
+    game.setInputEnabled(true);
+
     gameRef.current = game;
 
     return () => {
@@ -1071,46 +1120,10 @@ const App = () => {
     });
   }, [onlinePlayers, broadcastPlayers, sceneInfo?.id, user]);
 
-  const connectionChats = useMemo(() => {
-    const byConnection = new Map();
-
-    chatMessages.forEach((item) => {
-      const fallbackSender = typeof item?.sender === 'string' && item.sender ? item.sender : 'Connection';
-      const explicitKey = typeof item?.connectionKey === 'string' && item.connectionKey
-        ? item.connectionKey
-        : '';
-      const connectionKey = explicitKey || (item?.mine ? 'local-self' : `sender:${fallbackSender}`);
-      const connectionLabel = typeof item?.connectionLabel === 'string' && item.connectionLabel
-        ? item.connectionLabel
-        : fallbackSender;
-      const itemAt = Number(item?.at);
-      const at = Number.isFinite(itemAt) ? itemAt : 0;
-
-      if (!byConnection.has(connectionKey)) {
-        byConnection.set(connectionKey, {
-          connectionKey,
-          label: connectionLabel,
-          mine: Boolean(item?.mine),
-          latestAt: at,
-          messages: [],
-        });
-      }
-
-      const bucket = byConnection.get(connectionKey);
-      bucket.mine = bucket.mine || Boolean(item?.mine);
-      bucket.latestAt = Math.max(bucket.latestAt, at);
-      bucket.messages.push(item);
-    });
-
-    return Array.from(byConnection.values())
-      .map((bucket) => ({
-        ...bucket,
-        messages: bucket.messages
-          .slice()
-          .sort((a, b) => (Number(a?.at) || 0) - (Number(b?.at) || 0))
-          .slice(-CONNECTION_CHAT_HISTORY_LIMIT),
-      }))
-      .sort((a, b) => b.latestAt - a.latestAt);
+  const chatTimeline = useMemo(() => {
+    return chatMessages
+      .slice()
+      .sort((a, b) => (Number(a?.at) || 0) - (Number(b?.at) || 0));
   }, [chatMessages]);
 
   useEffect(() => {
@@ -1208,10 +1221,17 @@ const App = () => {
         return;
       }
 
+      if (event.code === 'Space') {
+        event.preventDefault();
+      }
+
       if (key === 't') {
         event.preventDefault();
-        setChatOpen((prev) => !prev);
-        if (chatOpen) setChatText('');
+        setChatOpen((prev) => {
+          const next = !prev;
+          if (!next) setChatText('');
+          return next;
+        });
         return;
       }
 
@@ -1224,7 +1244,20 @@ const App = () => {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [screen, chatOpen]);
+  }, [screen]);
+
+  useEffect(() => {
+    if (screen !== SCREEN.ROOM) return;
+
+    const game = gameRef.current;
+    if (!game || typeof game.setInputEnabled !== 'function') return;
+
+    game.setInputEnabled(!chatOpen);
+    if (chatOpen) {
+      stopJoystick();
+      releaseJumpKey();
+    }
+  }, [chatOpen, releaseJumpKey, screen, stopJoystick]);
 
   useEffect(() => {
     if (!chatOpen) return;
@@ -1325,6 +1358,7 @@ const App = () => {
       mine: true,
       at: Date.now(),
     });
+    speakChatMessage(localName, message);
 
     const channel = roomChannelRef.current;
     if (!channel) return;
@@ -1340,7 +1374,7 @@ const App = () => {
         sentAt: Date.now(),
       },
     });
-  }, [appendChatMessage, catRecord?.name, user]);
+  }, [appendChatMessage, catRecord?.name, speakChatMessage, user]);
 
   const handleChatSubmit = async (event) => {
     event.preventDefault();
@@ -1348,7 +1382,6 @@ const App = () => {
     try {
       await sendChatMessage(chatText);
       setChatText('');
-      setChatOpen(false);
     } catch (error) {
       setErrorText(sanitizeError(error, 'Failed to send chat message.'));
     }
@@ -1468,7 +1501,11 @@ const App = () => {
       const sender = typeof payload.name === 'string' ? payload.name : 'Cat player';
 
       if (!message) return;
-      if (fromPresenceKey && fromPresenceKey === localPresenceKeyRef.current) return;
+      if (fromPresenceKey) {
+        if (fromPresenceKey === localPresenceKeyRef.current) return;
+      } else if (fromId && fromId === user.id) {
+        return;
+      }
 
       const bubbleId = fromPresenceKey || fromId;
       if (!bubbleId) return;
@@ -1483,6 +1520,7 @@ const App = () => {
         at: Date.now(),
       });
       gameRef.current?.setRemoteChatBubble(bubbleId, message);
+      speakChatMessage(sender, message);
     });
 
     channel.on('broadcast', { event: 'skin-sync' }, (event) => {
@@ -1577,6 +1615,7 @@ const App = () => {
     realtimeRestartNonce,
     broadcastLocalSkinSync,
     handleRemoteSkinPayload,
+    speakChatMessage,
   ]);
 
   useEffect(() => {
@@ -1614,6 +1653,24 @@ const App = () => {
       maxHeight: '58dvh',
       minHeight: 260,
       borderRadius: 10,
+    };
+  }, [isMobileDevice]);
+
+  const roomMainLayoutStyle = useMemo(() => {
+    if (!isMobileDevice) return styles.roomMainLayout;
+
+    return {
+      ...styles.roomMainLayout,
+      ...styles.roomMainLayoutMobile,
+    };
+  }, [isMobileDevice]);
+
+  const chatSidebarStyle = useMemo(() => {
+    if (!isMobileDevice) return styles.chatSidebar;
+
+    return {
+      ...styles.chatSidebar,
+      ...styles.chatSidebarMobile,
     };
   }, [isMobileDevice]);
 
@@ -1750,6 +1807,17 @@ const App = () => {
               Enable music
             </button>
           ) : null}
+          {chatVoiceSupported ? (
+            <button
+              type="button"
+              style={chatVoiceEnabled ? styles.secondaryBtn : styles.voiceOffBtn}
+              onClick={() => setChatVoiceEnabled((prev) => !prev)}
+            >
+              {chatVoiceEnabled ? 'Voice on' : 'Voice off'}
+            </button>
+          ) : (
+            <span style={styles.voiceUnsupported}>Voice unavailable in this browser</span>
+          )}
           <button type="button" style={styles.secondaryBtn} onClick={goToEditor}>
             Edit cat
           </button>
@@ -1762,147 +1830,181 @@ const App = () => {
         </div>
       </div>
 
-      <div style={canvasWrapperStyle}>
-        <canvas
-          ref={canvasRef}
-          style={{ display: 'block', width: '100%', height: '100%', touchAction: 'none' }}
-        />
-      </div>
+      <div style={roomMainLayoutStyle}>
+        <aside style={chatSidebarStyle}>
+          <div style={styles.chatSidebarHeader}>
+            <strong style={styles.chatSidebarTitle}>Chat log</strong>
+            <span style={styles.chatSidebarHint}>
+              {isMobileDevice ? 'Tap C to toggle typing' : 'Press T to toggle typing'}
+            </span>
+          </div>
 
-      {!isMobileDevice ? (
-        <div style={styles.helpRow}>
-          <span style={styles.key}>A / D</span>
-          <span style={styles.hint}>Move</span>
-          <span style={styles.key}>W</span>
-          <span style={styles.hint}>Jump</span>
-          <span style={styles.key}>E</span>
-          <span style={styles.hint}>Interact</span>
-          <span style={styles.key}>Ctrl</span>
-          <span style={styles.hint}>Sit</span>
-          <span style={styles.key}>T</span>
-          <span style={styles.hint}>Chat</span>
-        </div>
-      ) : (
-        <div style={styles.mobileHud}>
-          <div
-            style={styles.joystickBase}
-            onPointerDown={handleJoystickDown}
-            onPointerMove={handleJoystickMove}
-            onPointerUp={handleJoystickUp}
-            onPointerCancel={handleJoystickUp}
-            onPointerLeave={handleJoystickUp}
-            onLostPointerCapture={handleJoystickCaptureLost}
-            onTouchStart={handleJoystickTouchStart}
-            onTouchMove={handleJoystickTouchMove}
-            onTouchEnd={handleJoystickTouchEnd}
-            onTouchCancel={handleJoystickTouchEnd}
-          >
-            <div
+          {chatOpen ? (
+            <form style={styles.chatForm} onSubmit={handleChatSubmit}>
+              <input
+                ref={chatInputRef}
+                style={styles.chatInput}
+                type="text"
+                value={chatText}
+                maxLength={CHAT_MAX_LENGTH}
+                onChange={(event) => setChatText(event.target.value)}
+                placeholder="Say something..."
+              />
+              <div style={styles.chatFormActions}>
+                <button
+                  type="submit"
+                  style={styles.primaryBtn}
+                  disabled={!chatText.trim()}
+                >
+                  Send
+                </button>
+                <button
+                  type="button"
+                  style={styles.secondaryBtn}
+                  onClick={() => {
+                    setChatOpen(false);
+                    setChatText('');
+                  }}
+                >
+                  Exit chat
+                </button>
+              </div>
+            </form>
+          ) : (
+            <button
+              type="button"
               style={{
-                ...styles.joystickKnob,
-                transform: `translate(${joystickOffset.x}px, ${joystickOffset.y}px)`,
+                ...styles.secondaryBtn,
+                ...styles.chatOpenBtn,
               }}
+              onClick={() => setChatOpen(true)}
+            >
+              {isMobileDevice ? 'Open chat' : 'Open chat (T)'}
+            </button>
+          )}
+
+          <div style={styles.chatPool}>
+            {chatTimeline.length === 0 ? (
+              <span style={styles.chatPoolEmpty}>
+                {isMobileDevice ? 'No messages yet. Tap C to open chat.' : 'No messages yet. Press T to open chat.'}
+              </span>
+            ) : (
+              chatTimeline.map((item) => {
+                const senderLabel = item?.mine
+                  ? 'You'
+                  : (
+                    (typeof item?.connectionLabel === 'string' && item.connectionLabel)
+                      || (typeof item?.sender === 'string' && item.sender)
+                      || 'Cat player'
+                  );
+
+                return (
+                  <div
+                    key={item.id}
+                    style={{
+                      ...styles.chatLine,
+                      ...(item?.mine ? styles.chatLineMine : null),
+                    }}
+                  >
+                    <span style={styles.chatLineSender}>{senderLabel}</span>
+                    <span style={styles.chatLineMessage}>{item?.message}</span>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </aside>
+
+        <div style={styles.gameColumn}>
+          <div style={canvasWrapperStyle}>
+            <canvas
+              ref={canvasRef}
+              style={{ display: 'block', width: '100%', height: '100%', touchAction: 'none' }}
             />
           </div>
 
-          <div style={styles.mobileActionStack}>
-            <button
-              type="button"
-              style={styles.mobileControlBtn}
-              onPointerDown={handleMobileJumpDown}
-              onPointerUp={handleMobileJumpUp}
-              onPointerCancel={handleMobileJumpUp}
-              onPointerLeave={handleMobileJumpUp}
-              onLostPointerCapture={handleMobileJumpCaptureLost}
-              onTouchStart={handleMobileJumpTouchDown}
-              onTouchEnd={handleMobileJumpTouchUp}
-              onTouchCancel={handleMobileJumpTouchUp}
-            >
-              ^
-            </button>
-            <button
-              type="button"
-              style={styles.mobileControlBtn}
-              onPointerDown={handleMobileSit}
-              onTouchStart={handleMobileSitTouch}
-            >
-              v
-            </button>
-            <button
-              type="button"
-              style={styles.mobileChatBtn}
-              onPointerDown={handleMobileChat}
-              onTouchStart={handleMobileChatTouch}
-            >
-              C
-            </button>
-          </div>
-        </div>
-      )}
-
-      {chatOpen ? (
-        <form style={styles.chatForm} onSubmit={handleChatSubmit}>
-          <input
-            ref={chatInputRef}
-            style={styles.chatInput}
-            type="text"
-            value={chatText}
-            maxLength={CHAT_MAX_LENGTH}
-            onChange={(event) => setChatText(event.target.value)}
-            placeholder="Say something..."
-          />
-          <button
-            type="submit"
-            style={styles.primaryBtn}
-            disabled={!chatText.trim()}
-          >
-            Send
-          </button>
-        </form>
-      ) : null}
-
-      <div style={styles.chatPool}>
-        {connectionChats.length === 0 ? (
-          <span style={styles.chatPoolEmpty}>
-            {isMobileDevice ? 'No messages yet. Tap C to open chat.' : 'No messages yet. Press T to open chat.'}
-          </span>
-        ) : (
-          <div style={styles.connectionChatGrid}>
-            {connectionChats.map((connection) => (
-              <section
-                key={connection.connectionKey}
-                style={{
-                  ...styles.connectionChatCard,
-                  ...(connection.mine ? styles.connectionChatCardMine : null),
-                }}
+          {!isMobileDevice ? (
+            <div style={styles.helpRow}>
+              <span style={styles.key}>A / D</span>
+              <span style={styles.hint}>Move</span>
+              <span style={styles.key}>W</span>
+              <span style={styles.hint}>Jump</span>
+              <span style={styles.key}>E</span>
+              <span style={styles.hint}>Interact</span>
+              <span style={styles.key}>Ctrl</span>
+              <span style={styles.hint}>Sit</span>
+              <span style={styles.key}>T</span>
+              <span style={styles.hint}>Chat</span>
+            </div>
+          ) : (
+            <div style={styles.mobileHud}>
+              <div
+                style={styles.joystickBase}
+                onPointerDown={handleJoystickDown}
+                onPointerMove={handleJoystickMove}
+                onPointerUp={handleJoystickUp}
+                onPointerCancel={handleJoystickUp}
+                onPointerLeave={handleJoystickUp}
+                onLostPointerCapture={handleJoystickCaptureLost}
+                onTouchStart={handleJoystickTouchStart}
+                onTouchMove={handleJoystickTouchMove}
+                onTouchEnd={handleJoystickTouchEnd}
+                onTouchCancel={handleJoystickTouchEnd}
               >
-                <div style={styles.connectionChatHeader}>
-                  <strong style={styles.connectionChatSender}>{connection.label}</strong>
-                  <span style={styles.connectionChatCount}>{connection.messages.length} msgs</span>
-                </div>
+                <div
+                  style={{
+                    ...styles.joystickKnob,
+                    transform: `translate(${joystickOffset.x}px, ${joystickOffset.y}px)`,
+                  }}
+                />
+              </div>
 
-                <div style={styles.connectionChatBody}>
-                  {connection.messages.map((item) => (
-                    <div key={item.id} style={styles.connectionChatRow}>
-                      <span style={styles.connectionChatMessage}>{item.message}</span>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            ))}
-          </div>
-        )}
-      </div>
+              <div style={styles.mobileActionStack}>
+                <button
+                  type="button"
+                  style={styles.mobileControlBtn}
+                  onPointerDown={handleMobileJumpDown}
+                  onPointerUp={handleMobileJumpUp}
+                  onPointerCancel={handleMobileJumpUp}
+                  onPointerLeave={handleMobileJumpUp}
+                  onLostPointerCapture={handleMobileJumpCaptureLost}
+                  onTouchStart={handleMobileJumpTouchDown}
+                  onTouchEnd={handleMobileJumpTouchUp}
+                  onTouchCancel={handleMobileJumpTouchUp}
+                >
+                  ^
+                </button>
+                <button
+                  type="button"
+                  style={styles.mobileControlBtn}
+                  onPointerDown={handleMobileSit}
+                  onTouchStart={handleMobileSitTouch}
+                >
+                  v
+                </button>
+                <button
+                  type="button"
+                  style={styles.mobileChatBtn}
+                  onPointerDown={handleMobileChat}
+                  onTouchStart={handleMobileChatTouch}
+                >
+                  C
+                </button>
+              </div>
+            </div>
+          )}
 
-      {remotePlayers.length > 0 ? (
-        <div style={styles.onlineList}>
-          {remotePlayers.map((player) => (
-            <span key={player.presenceKey || player.userId} style={styles.onlineItem}>
-              {player.name}
-            </span>
-          ))}
+          {remotePlayers.length > 0 ? (
+            <div style={styles.onlineList}>
+              {remotePlayers.map((player) => (
+                <span key={player.presenceKey || player.userId} style={styles.onlineItem}>
+                  {player.name}
+                </span>
+              ))}
+            </div>
+          ) : null}
         </div>
-      ) : null}
+      </div>
 
       {errorText ? <p style={styles.error}>{errorText}</p> : null}
     </div>
@@ -1997,6 +2099,20 @@ const styles = {
     color: '#dff8ff',
     cursor: 'pointer',
   },
+  voiceOffBtn: {
+    border: '1px solid rgba(255, 209, 150, 0.45)',
+    borderRadius: 10,
+    padding: '9px 12px',
+    background: 'rgba(120, 86, 35, 0.24)',
+    color: '#ffe8cc',
+    cursor: 'pointer',
+  },
+  voiceUnsupported: {
+    fontSize: 12,
+    color: 'rgba(255, 222, 191, 0.92)',
+    padding: '7px 2px',
+    alignSelf: 'center',
+  },
   ghostBtn: {
     border: '1px solid rgba(255,160,160,0.45)',
     borderRadius: 10,
@@ -2028,7 +2144,7 @@ const styles = {
     overflowY: 'auto',
   },
   roomHeader: {
-    maxWidth: 980,
+    maxWidth: 1280,
     width: '100%',
     margin: '0 auto',
     display: 'flex',
@@ -2059,23 +2175,68 @@ const styles = {
     gap: 8,
     flexWrap: 'wrap',
   },
+  roomMainLayout: {
+    maxWidth: 1280,
+    width: '100%',
+    margin: '0 auto',
+    display: 'grid',
+    gridTemplateColumns: '320px minmax(0, 1fr)',
+    gap: 12,
+    alignItems: 'stretch',
+    minHeight: 0,
+  },
+  roomMainLayoutMobile: {
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  chatSidebar: {
+    border: '1px solid rgba(255,255,255,0.16)',
+    borderRadius: 10,
+    background: 'rgba(5, 13, 24, 0.62)',
+    padding: 10,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 10,
+    minHeight: 0,
+    maxHeight: 'calc(100dvh - 190px)',
+  },
+  chatSidebarMobile: {
+    maxHeight: 'none',
+  },
+  chatSidebarHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+  },
+  chatSidebarTitle: {
+    fontSize: 14,
+    color: '#f4fbff',
+    letterSpacing: '0.02em',
+  },
+  chatSidebarHint: {
+    fontSize: 11,
+    color: 'rgba(214, 241, 255, 0.75)',
+  },
+  gameColumn: {
+    minWidth: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 12,
+  },
   canvasWrapper: {
     border: '1px solid rgba(255,255,255,0.1)',
     borderRadius: 8,
     overflow: 'hidden',
     boxShadow: '0 0 40px rgba(80,80,200,0.15)',
     width: '100%',
-    maxWidth: 980,
     aspectRatio: '16 / 10',
     maxHeight: '64dvh',
-    margin: '0 auto',
     lineHeight: 0,
     background: '#0e1320',
   },
   helpRow: {
-    maxWidth: 980,
     width: '100%',
-    margin: '0 auto',
     display: 'flex',
     flexWrap: 'wrap',
     gap: 8,
@@ -2097,9 +2258,7 @@ const styles = {
     marginRight: 8,
   },
   mobileHud: {
-    maxWidth: 980,
     width: '100%',
-    margin: '0 auto',
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'flex-end',
@@ -2165,9 +2324,7 @@ const styles = {
     WebkitTouchCallout: 'none',
   },
   onlineList: {
-    maxWidth: 980,
     width: '100%',
-    margin: '0 auto',
     display: 'flex',
     flexWrap: 'wrap',
     gap: 8,
@@ -2180,12 +2337,19 @@ const styles = {
     fontSize: 12,
   },
   chatForm: {
-    maxWidth: 980,
     width: '100%',
-    margin: '0 auto',
-    display: 'grid',
-    gridTemplateColumns: '1fr auto',
+    display: 'flex',
+    flexDirection: 'column',
     gap: 8,
+  },
+  chatFormActions: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 8,
+  },
+  chatOpenBtn: {
+    width: '100%',
   },
   chatInput: {
     width: '100%',
@@ -2198,17 +2362,16 @@ const styles = {
     fontSize: 14,
   },
   chatPool: {
-    maxWidth: 980,
     width: '100%',
-    margin: '0 auto',
     border: '1px solid rgba(255,255,255,0.16)',
     borderRadius: 10,
-    background: 'rgba(5, 13, 24, 0.65)',
+    background: 'rgba(3, 11, 21, 0.78)',
     padding: 10,
     display: 'flex',
     flexDirection: 'column',
-    gap: 10,
-    maxHeight: 320,
+    gap: 8,
+    flex: 1,
+    minHeight: 170,
     overflowY: 'auto',
   },
   chatPoolEmpty: {
@@ -2216,56 +2379,26 @@ const styles = {
     opacity: 0.7,
     padding: '4px 2px',
   },
-  connectionChatGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-    gap: 10,
-  },
-  connectionChatCard: {
+  chatLine: {
     borderRadius: 8,
-    border: '1px solid rgba(196, 223, 255, 0.2)',
-    background: 'linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02))',
-    padding: '8px 9px',
+    border: '1px solid rgba(196, 223, 255, 0.18)',
+    background: 'linear-gradient(180deg, rgba(255,255,255,0.07), rgba(255,255,255,0.02))',
+    padding: '7px 8px',
     display: 'flex',
     flexDirection: 'column',
-    gap: 8,
-    minHeight: 138,
+    gap: 4,
   },
-  connectionChatCardMine: {
-    border: '1px solid rgba(125, 228, 255, 0.36)',
-    background: 'linear-gradient(180deg, rgba(125, 228, 255, 0.16), rgba(125, 228, 255, 0.06))',
+  chatLineMine: {
+    border: '1px solid rgba(123, 224, 255, 0.34)',
+    background: 'linear-gradient(180deg, rgba(123, 224, 255, 0.14), rgba(123, 224, 255, 0.05))',
   },
-  connectionChatHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-  },
-  connectionChatSender: {
+  chatLineSender: {
     fontSize: 12,
-    opacity: 0.9,
-    color: '#f3fbff',
-    lineHeight: 1.2,
+    fontWeight: 700,
+    color: '#def4ff',
+    opacity: 0.95,
   },
-  connectionChatCount: {
-    fontSize: 11,
-    opacity: 0.7,
-  },
-  connectionChatBody: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 6,
-    maxHeight: 188,
-    overflowY: 'auto',
-    paddingRight: 3,
-  },
-  connectionChatRow: {
-    borderRadius: 6,
-    border: '1px solid rgba(255,255,255,0.1)',
-    background: 'rgba(4, 14, 28, 0.5)',
-    padding: '6px 7px',
-  },
-  connectionChatMessage: {
+  chatLineMessage: {
     fontSize: 13,
     color: '#eef8ff',
     whiteSpace: 'pre-wrap',

@@ -320,6 +320,10 @@ export class Game {
     if (this._catEntity) this._customSkin.reset(this._catEntity);
   }
 
+  setInputEnabled(nextEnabled) {
+    this._inputSystem?.setEnabled(nextEnabled);
+  }
+
   setRemotePlayers(players = []) {
     if (!this._skeletonData) {
       this._pendingRemotePlayers = players;
