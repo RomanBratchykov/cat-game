@@ -10,6 +10,8 @@
   font-weight: 400;
   color: #e8eff7;
   background: #0f111d;
+  --app-vh: 1vh;
+  --app-vw: 1vw;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -29,7 +31,7 @@ body,
 }
 
 body {
-  min-height: 100dvh;
+  min-height: calc(var(--app-vh, 1vh) * 100);
   overflow-x: hidden;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
@@ -47,7 +49,7 @@ textarea {
 
 .app-bg-shell {
   position: relative;
-  min-height: 100vh;
+  min-height: calc(var(--app-vh, 1vh) * 100);
   background: linear-gradient(145deg, #0f111d 0%, #1a2236 48%, #233b48 100%);
 }
 

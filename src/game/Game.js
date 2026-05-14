@@ -42,6 +42,7 @@ const INTERACT_DISTANCE_PX = 102;
 const REMOTE_INTERPOLATION_FACTOR = 0.2;
 const REMOTE_SNAP_DISTANCE_PX = 240;
 const REMOTE_MOVE_HOLD_MS = 220;
+const REMOTE_EXTRAPOLATION_MAX_MS = 320;
 const MAX_RENDER_RESOLUTION = 1.5;
 const LOCAL_STATE_EMIT_INTERVAL_MS = 90;
 const PLATFORM_THICKNESS = 14;
@@ -60,6 +61,10 @@ const COIN_FLOAT_SPEED = 0.005;
 const MINI_GAME_EMIT_INTERVAL_MS = 220;
 const STAT_MIN = 0;
 const STAT_MAX = 100;
+const NEEDS_WARN_THRESHOLD = 20;
+const NEEDS_CRITICAL_THRESHOLD = 6;
+const NEEDS_MEOW_LOW_COOLDOWN_MS = 12000;
+const NEEDS_MEOW_CRIT_COOLDOWN_MS = 6000;
 const FOOD_DECAY_PER_SEC = 0.85;
 const WATER_DECAY_PER_SEC = 1.05;
 const SLEEP_DECAY_PER_SEC = 0.58;
@@ -211,6 +216,58 @@ const SCENE_ROOMS = {
   },
 };
 
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function lerpColor(start, end, t) {
+  const sr = (start >> 16) & 0xff;
+  const sg = (start >> 8) & 0xff;
+  const sb = start & 0xff;
+  const er = (end >> 16) & 0xff;
+  const eg = (end >> 8) & 0xff;
+  const eb = end & 0xff;
+
+  const r = Math.round(lerp(sr, er, t));
+  const g = Math.round(lerp(sg, eg, t));
+  const b = Math.round(lerp(sb, eb, t));
+  return (r << 16) + (g << 8) + b;
+}
+
+function drawVerticalGradient(gfx, x, y, width, height, topColor, bottomColor, steps = 16) {
+  const safeSteps = Math.max(2, Math.round(steps));
+  const bandHeight = height / safeSteps;
+
+  for (let i = 0; i < safeSteps; i += 1) {
+    const t = i / (safeSteps - 1);
+    const color = lerpColor(topColor, bottomColor, t);
+    gfx.beginFill(color, 1);
+    gfx.drawRect(x, y + bandHeight * i, width, bandHeight + 1);
+    gfx.endFill();
+  }
+}
+
+function seededUnit(seed, index) {
+  const value = Math.sin((index + 1) * 12.9898 + seed * 78.233) * 43758.5453;
+  return value - Math.floor(value);
+}
+
+function drawStarfield(gfx, sceneId, width, height) {
+  const seedBase = sceneId.split('').reduce((acc, char) => acc + char.charCodeAt(0), 17);
+  const starCount = Math.max(28, Math.round(width / 18));
+
+  for (let i = 0; i < starCount; i += 1) {
+    const x = seededUnit(seedBase, i * 3) * width;
+    const y = seededUnit(seedBase, i * 3 + 1) * height;
+    const size = 0.6 + seededUnit(seedBase, i * 3 + 2) * 1.6;
+    const alpha = 0.18 + seededUnit(seedBase, i * 3 + 3) * 0.62;
+
+    gfx.beginFill(0xffffff, alpha);
+    gfx.drawCircle(x, y, size);
+    gfx.endFill();
+  }
+}
+
 function clampStat(value) {
   return Math.max(STAT_MIN, Math.min(STAT_MAX, value));
 }
@@ -223,12 +280,276 @@ function getSceneRoom(roomId) {
   return SCENE_ROOMS[DEFAULT_SCENE_ROOM];
 }
 
+function drawGenericObject(container, item) {
+  const body = new PIXI.Graphics();
+  body.beginFill(item.color, 0.95);
+  body.drawRoundedRect(-item.width / 2, -item.height, item.width, item.height, 12);
+  body.endFill();
+  body.lineStyle(2, item.accent, 0.95);
+  body.drawRoundedRect(-item.width / 2, -item.height, item.width, item.height, 12);
+
+  const shine = new PIXI.Graphics();
+  shine.beginFill(item.accent, 0.22);
+  shine.drawRoundedRect(
+    -item.width / 2 + 6,
+    -item.height + 5,
+    item.width - 12,
+    Math.max(10, item.height * 0.33),
+    8
+  );
+  shine.endFill();
+
+  container.addChild(body);
+  container.addChild(shine);
+}
+
+function drawWaterBowl(container, item) {
+  const w = item.width;
+  const h = item.height;
+
+  const bowl = new PIXI.Graphics();
+  bowl.beginFill(item.color, 0.95);
+  bowl.drawRoundedRect(-w * 0.46, -h * 0.55, w * 0.92, h * 0.52, Math.max(6, h * 0.22));
+  bowl.endFill();
+  bowl.lineStyle(2, item.accent, 0.95);
+  bowl.drawRoundedRect(-w * 0.46, -h * 0.55, w * 0.92, h * 0.52, Math.max(6, h * 0.22));
+  bowl.beginFill(item.accent, 0.6);
+  bowl.drawEllipse(0, -h * 0.37, w * 0.32, h * 0.12);
+  bowl.endFill();
+
+  container.addChild(bowl);
+}
+
+function drawFoodKiosk(container, item) {
+  const w = item.width;
+  const h = item.height;
+
+  const base = new PIXI.Graphics();
+  base.beginFill(item.color, 0.95);
+  base.drawRoundedRect(-w / 2, -h * 0.62, w, h * 0.62, 10);
+  base.endFill();
+  base.lineStyle(2, item.accent, 0.9);
+  base.drawRoundedRect(-w / 2, -h * 0.62, w, h * 0.62, 10);
+
+  const roof = new PIXI.Graphics();
+  roof.beginFill(item.accent, 0.9);
+  roof.drawPolygon([
+    -w * 0.62, -h * 0.62,
+    w * 0.62, -h * 0.62,
+    w * 0.44, -h * 0.96,
+    -w * 0.44, -h * 0.96,
+  ]);
+  roof.endFill();
+  roof.lineStyle(1, 0xffffff, 0.35);
+  for (let x = -w * 0.44; x <= w * 0.44; x += w * 0.18) {
+    roof.moveTo(x, -h * 0.62);
+    roof.lineTo(x + w * 0.1, -h * 0.96);
+  }
+
+  const sign = new PIXI.Graphics();
+  sign.beginFill(0xffffff, 0.85);
+  sign.drawRoundedRect(-w * 0.22, -h * 0.5, w * 0.44, h * 0.16, 6);
+  sign.endFill();
+  sign.lineStyle(2, item.accent, 0.9);
+  sign.drawRoundedRect(-w * 0.22, -h * 0.5, w * 0.44, h * 0.16, 6);
+
+  container.addChild(roof);
+  container.addChild(base);
+  container.addChild(sign);
+}
+
+function drawScratchPost(container, item) {
+  const w = item.width;
+  const h = item.height;
+
+  const base = new PIXI.Graphics();
+  base.beginFill(item.color, 0.95);
+  base.drawRoundedRect(-w * 0.5, -h * 0.18, w, h * 0.18, 8);
+  base.endFill();
+
+  const post = new PIXI.Graphics();
+  post.beginFill(item.color, 0.95);
+  post.drawRoundedRect(-w * 0.14, -h * 0.88, w * 0.28, h * 0.7, 10);
+  post.endFill();
+  post.lineStyle(2, item.accent, 0.6);
+  for (let y = -h * 0.82; y <= -h * 0.25; y += 10) {
+    post.moveTo(-w * 0.14, y);
+    post.lineTo(w * 0.14, y + 2);
+  }
+
+  const top = new PIXI.Graphics();
+  top.beginFill(item.accent, 0.95);
+  top.drawRoundedRect(-w * 0.34, -h * 0.98, w * 0.68, h * 0.12, 8);
+  top.endFill();
+
+  container.addChild(post);
+  container.addChild(base);
+  container.addChild(top);
+}
+
+function drawYarnBasket(container, item) {
+  const w = item.width;
+  const h = item.height;
+
+  const basket = new PIXI.Graphics();
+  basket.beginFill(item.color, 0.95);
+  basket.drawRoundedRect(-w * 0.5, -h * 0.5, w, h * 0.48, 12);
+  basket.endFill();
+  basket.lineStyle(2, item.accent, 0.9);
+  basket.drawRoundedRect(-w * 0.5, -h * 0.5, w, h * 0.48, 12);
+  basket.lineStyle(2, item.accent, 0.8);
+  basket.drawEllipse(0, -h * 0.5, w * 0.48, h * 0.14);
+
+  const yarn = new PIXI.Graphics();
+  yarn.beginFill(0xffd27d, 0.95);
+  yarn.drawCircle(-w * 0.18, -h * 0.6, w * 0.16);
+  yarn.endFill();
+  yarn.beginFill(0x9ed8ff, 0.95);
+  yarn.drawCircle(0, -h * 0.62, w * 0.18);
+  yarn.endFill();
+  yarn.beginFill(0xf4a6d7, 0.95);
+  yarn.drawCircle(w * 0.2, -h * 0.58, w * 0.15);
+  yarn.endFill();
+
+  container.addChild(basket);
+  container.addChild(yarn);
+}
+
+function drawNapPillow(container, item) {
+  const w = item.width;
+  const h = item.height;
+
+  const pillow = new PIXI.Graphics();
+  pillow.beginFill(item.color, 0.95);
+  pillow.drawRoundedRect(-w * 0.55, -h * 0.38, w * 1.1, h * 0.34, h * 0.2);
+  pillow.endFill();
+  pillow.lineStyle(2, item.accent, 0.9);
+  pillow.drawRoundedRect(-w * 0.55, -h * 0.38, w * 1.1, h * 0.34, h * 0.2);
+  pillow.beginFill(item.accent, 0.3);
+  pillow.drawRoundedRect(-w * 0.35, -h * 0.3, w * 0.7, h * 0.16, 10);
+  pillow.endFill();
+  pillow.beginFill(item.accent, 0.7);
+  pillow.drawCircle(-w * 0.2, -h * 0.22, w * 0.04);
+  pillow.drawCircle(w * 0.2, -h * 0.22, w * 0.04);
+  pillow.endFill();
+
+  container.addChild(pillow);
+}
+
+function drawTelescope(container, item) {
+  const w = item.width;
+  const h = item.height;
+
+  const tripod = new PIXI.Graphics();
+  tripod.lineStyle(3, item.accent, 0.9);
+  tripod.moveTo(0, -h * 0.45);
+  tripod.lineTo(-w * 0.36, 0);
+  tripod.moveTo(0, -h * 0.45);
+  tripod.lineTo(w * 0.36, 0);
+  tripod.moveTo(0, -h * 0.45);
+  tripod.lineTo(0, 0);
+
+  const base = new PIXI.Graphics();
+  base.beginFill(item.accent, 0.9);
+  base.drawCircle(0, 0, w * 0.08);
+  base.endFill();
+
+  const tube = new PIXI.Graphics();
+  tube.beginFill(item.color, 0.95);
+  tube.drawRoundedRect(-w * 0.08, -h * 0.06, w * 0.56, h * 0.14, 8);
+  tube.endFill();
+  tube.lineStyle(2, item.accent, 0.8);
+  tube.drawRoundedRect(-w * 0.08, -h * 0.06, w * 0.56, h * 0.14, 8);
+  tube.x = -w * 0.12;
+  tube.y = -h * 0.52;
+  tube.rotation = -0.45;
+
+  const lens = new PIXI.Graphics();
+  lens.beginFill(item.accent, 0.95);
+  lens.drawCircle(0, 0, w * 0.08);
+  lens.endFill();
+  lens.x = tube.x + Math.cos(tube.rotation) * w * 0.48;
+  lens.y = tube.y + Math.sin(tube.rotation) * w * 0.48;
+
+  container.addChild(tripod);
+  container.addChild(base);
+  container.addChild(tube);
+  container.addChild(lens);
+}
+
+function drawRadioConsole(container, item) {
+  const w = item.width;
+  const h = item.height;
+
+  const base = new PIXI.Graphics();
+  base.beginFill(item.color, 0.95);
+  base.drawRoundedRect(-w * 0.5, -h * 0.6, w, h * 0.6, 10);
+  base.endFill();
+  base.lineStyle(2, item.accent, 0.9);
+  base.drawRoundedRect(-w * 0.5, -h * 0.6, w, h * 0.6, 10);
+
+  const screen = new PIXI.Graphics();
+  screen.beginFill(item.accent, 0.4);
+  screen.drawRoundedRect(-w * 0.3, -h * 0.5, w * 0.6, h * 0.2, 6);
+  screen.endFill();
+
+  const knobs = new PIXI.Graphics();
+  knobs.beginFill(0xffffff, 0.9);
+  knobs.drawCircle(-w * 0.25, -h * 0.25, w * 0.07);
+  knobs.drawCircle(0, -h * 0.25, w * 0.07);
+  knobs.drawCircle(w * 0.25, -h * 0.25, w * 0.07);
+  knobs.endFill();
+
+  const antenna = new PIXI.Graphics();
+  antenna.lineStyle(2, item.accent, 0.9);
+  antenna.moveTo(w * 0.35, -h * 0.6);
+  antenna.lineTo(w * 0.48, -h * 0.9);
+  antenna.beginFill(item.accent, 0.9);
+  antenna.drawCircle(w * 0.48, -h * 0.9, w * 0.04);
+  antenna.endFill();
+
+  container.addChild(base);
+  container.addChild(screen);
+  container.addChild(knobs);
+  container.addChild(antenna);
+}
+
+function drawSceneObject(container, item) {
+  switch (item.id) {
+    case 'water-bowl':
+      drawWaterBowl(container, item);
+      return;
+    case 'food-kiosk':
+      drawFoodKiosk(container, item);
+      return;
+    case 'scratch-post':
+      drawScratchPost(container, item);
+      return;
+    case 'yarn-basket':
+      drawYarnBasket(container, item);
+      return;
+    case 'nap-pillow':
+      drawNapPillow(container, item);
+      return;
+    case 'telescope':
+      drawTelescope(container, item);
+      return;
+    case 'radio-console':
+      drawRadioConsole(container, item);
+      return;
+    default:
+      drawGenericObject(container, item);
+  }
+}
+
 export class Game {
   constructor(canvas, options = {}) {
     console.log('[Game] Initializing...');
 
     this._canvas = canvas;
     this._bg = null;
+    this._stars = null;
+    this._haze = null;
     this._floor = null;
     this._resizeObserver = null;
     this._onResize = this._onResize.bind(this);
@@ -251,6 +572,9 @@ export class Game {
     this._showRemoteAcrossRooms = options.showRemoteAcrossRooms === true;
     this._emitStateEveryMs = LOCAL_STATE_EMIT_INTERVAL_MS;
     this._emitStateClock = 0;
+    this._lastLocalEmitAt = 0;
+    this._lastLocalEmitX = null;
+    this._lastLocalEmitY = null;
     this._remotePlayers = new Map();
     this._pendingRemotePlayers = [];
     this._pendingRemoteBubbles = new Map();
@@ -279,6 +603,7 @@ export class Game {
       sleep: 75,
     };
     this._lastMiniGameEmitAt = 0;
+    this._nextNeedMeowAt = 0;
 
     const renderResolution = Math.min(window.devicePixelRatio || 1, MAX_RENDER_RESOLUTION);
     const isCoarsePointer = window.matchMedia?.('(pointer: coarse)')?.matches || false;
@@ -316,6 +641,7 @@ export class Game {
     }
 
     const audioSystem = new AudioSystem();
+    this._audioSystem = audioSystem;
     const inputSystem = new InputSystem();
     this._inputSystem = inputSystem;
     const dragSystem  = new DragSystem(this._app, audioSystem);
@@ -630,17 +956,7 @@ export class Game {
       container.x = x;
       container.y = y;
 
-      const body = new PIXI.Graphics();
-      body.beginFill(item.color, 0.95);
-      body.drawRoundedRect(-item.width / 2, -item.height, item.width, item.height, 12);
-      body.endFill();
-      body.lineStyle(2, item.accent, 0.95);
-      body.drawRoundedRect(-item.width / 2, -item.height, item.width, item.height, 12);
-
-      const shine = new PIXI.Graphics();
-      shine.beginFill(item.accent, 0.22);
-      shine.drawRoundedRect(-item.width / 2 + 6, -item.height + 5, item.width - 12, Math.max(10, item.height * 0.33), 8);
-      shine.endFill();
+      drawSceneObject(container, item);
 
       const label = new PIXI.Text(item.label, {
         fill: '#e8f4ff',
@@ -652,8 +968,6 @@ export class Game {
       label.anchor.set(0.5, 1);
       label.y = -item.height - 4;
 
-      container.addChild(body);
-      container.addChild(shine);
       container.addChild(label);
       this._sceneObjectLayer.addChild(container);
 
@@ -873,12 +1187,17 @@ export class Game {
 
   _buildMiniGameStatus() {
     const { food, water, sleep, wallet } = this._economy;
-    if (food <= 0 || water <= 0 || sleep <= 0) {
-      return 'Critical needs! Refill now or your kitten will collapse.';
+    const minNeed = Math.min(food, water);
+    if (minNeed <= NEEDS_CRITICAL_THRESHOLD) {
+      return 'Critical hunger or thirst! Movement slowed until you eat or drink.';
     }
 
-    if (food < 20 || water < 20 || sleep < 20) {
-      return 'Needs are low. Find food, water, and rest.';
+    if (minNeed <= NEEDS_WARN_THRESHOLD) {
+      return 'Hungry or thirsty. Find food or water to avoid slowdown.';
+    }
+
+    if (sleep < 20) {
+      return 'Sleep is low. Find a nap pillow or telescope.';
     }
 
     if (wallet < FOOD_MEAL_COST) {
@@ -1043,6 +1362,41 @@ export class Game {
     return collected;
   }
 
+  _applyNeedEffects(now) {
+    if (!this._catEntity) return;
+
+    const input = this._catEntity.get(InputComponent);
+    if (!input) return;
+
+    const minNeed = Math.min(this._economy.food, this._economy.water);
+    let speedMultiplier = 1;
+    let jumpMultiplier = 1;
+    let meowCooldown = 0;
+
+    if (minNeed <= NEEDS_CRITICAL_THRESHOLD) {
+      speedMultiplier = 0.5;
+      jumpMultiplier = 0.7;
+      meowCooldown = NEEDS_MEOW_CRIT_COOLDOWN_MS;
+    } else if (minNeed <= NEEDS_WARN_THRESHOLD) {
+      speedMultiplier = 0.75;
+      jumpMultiplier = 0.85;
+      meowCooldown = NEEDS_MEOW_LOW_COOLDOWN_MS;
+    }
+
+    input.moveSpeedMultiplier = speedMultiplier;
+    input.jumpMultiplier = jumpMultiplier;
+
+    if (meowCooldown > 0) {
+      if (!this._nextNeedMeowAt || now >= this._nextNeedMeowAt) {
+        this._audioSystem?.playMeow(0.6);
+        const jitter = meowCooldown * (0.85 + Math.random() * 0.4);
+        this._nextNeedMeowAt = now + jitter;
+      }
+    } else {
+      this._nextNeedMeowAt = 0;
+    }
+  }
+
   _tickMiniGame(elapsedMs = 16.67) {
     if (!this._catEntity) return;
 
@@ -1057,6 +1411,7 @@ export class Game {
     this._economy.sleep = clampStat(this._economy.sleep - SLEEP_DECAY_PER_SEC * dt);
 
     const now = Date.now();
+    this._applyNeedEffects(now);
     if (now - this._lastCoinSpawnAt >= COIN_SPAWN_INTERVAL_MS) {
       this._lastCoinSpawnAt = now;
       const spawned = this._spawnCoin();
@@ -1107,22 +1462,34 @@ export class Game {
     const now = Date.now();
 
     for (const entry of this._remotePlayers.values()) {
-      const dx = entry.targetX - entry.container.x;
-      const dy = entry.targetY - entry.container.y;
+      const extrapolationMs = Math.max(0, Math.min(REMOTE_EXTRAPOLATION_MAX_MS, now - entry.lastUpdateAt));
+      const predictedX = entry.lastReceivedX + entry.netVx * (extrapolationMs / 1000);
+      const predictedY = entry.lastReceivedY + entry.netVy * (extrapolationMs / 1000);
+      const targetX = Number.isFinite(predictedX) ? predictedX : entry.targetX;
+      const targetY = Number.isFinite(predictedY) ? predictedY : entry.targetY;
+
+      const dx = targetX - entry.container.x;
+      const dy = targetY - entry.container.y;
       const distance = Math.hypot(dx, dy);
 
       if (distance > REMOTE_SNAP_DISTANCE_PX) {
-        entry.container.x = entry.targetX;
-        entry.container.y = entry.targetY;
+        entry.container.x = targetX;
+        entry.container.y = targetY;
       } else if (distance > 0.01) {
-        entry.container.x += dx * REMOTE_INTERPOLATION_FACTOR;
-        entry.container.y += dy * REMOTE_INTERPOLATION_FACTOR;
-        if (Math.abs(entry.targetX - entry.container.x) < 0.08) entry.container.x = entry.targetX;
-        if (Math.abs(entry.targetY - entry.container.y) < 0.08) entry.container.y = entry.targetY;
+        const catchup = Math.min(0.18, (extrapolationMs / 1000) * 0.2);
+        const lerpFactor = Math.min(0.35, REMOTE_INTERPOLATION_FACTOR + catchup);
+        entry.container.x += dx * lerpFactor;
+        entry.container.y += dy * lerpFactor;
+        if (Math.abs(targetX - entry.container.x) < 0.08) entry.container.x = targetX;
+        if (Math.abs(targetY - entry.container.y) < 0.08) entry.container.y = targetY;
       }
 
       const isMoving = distance > 0.65 || now < entry.movementHoldUntil;
-      const wantedAnim = isMoving ? CONFIG.ANIM.WALK : CONFIG.ANIM.STAND;
+      const wantedAnim = entry.isSitting
+        ? CONFIG.ANIM.SIT
+        : isMoving
+          ? CONFIG.ANIM.WALK
+          : CONFIG.ANIM.STAND;
       if (entry.currentAnim !== wantedAnim) {
         entry.spine.state.setAnimation(0, wantedAnim, true);
         entry.currentAnim = wantedAnim;
@@ -1146,10 +1513,25 @@ export class Game {
     const input = this._catEntity.get(InputComponent);
     if (!tf) return;
 
+    const now = Date.now();
+    const prevAt = this._lastLocalEmitAt || now;
+    const dtMs = Math.max(1, now - prevAt);
+    const prevX = Number.isFinite(this._lastLocalEmitX) ? this._lastLocalEmitX : tf.x;
+    const prevY = Number.isFinite(this._lastLocalEmitY) ? this._lastLocalEmitY : tf.y;
+    const vx = (tf.x - prevX) / (dtMs / 1000);
+    const vy = (tf.y - prevY) / (dtMs / 1000);
+
+    this._lastLocalEmitAt = now;
+    this._lastLocalEmitX = tf.x;
+    this._lastLocalEmitY = tf.y;
+
     this._onLocalState({
       x: Number(tf.x.toFixed(2)),
       y: Number(tf.y.toFixed(2)),
+      vx: Number(vx.toFixed(2)),
+      vy: Number(vy.toFixed(2)),
       facingRight: input?.facingRight !== false,
+      isSitting: input?.isSitting === true,
       sceneRoom: this._sceneRoomId,
     });
   }
@@ -1194,11 +1576,17 @@ export class Game {
       skinEntity,
       baseScale,
       currentAnim: CONFIG.ANIM.STAND,
+      isSitting: false,
       sceneRoom: typeof player?.sceneRoom === 'string' ? player.sceneRoom : DEFAULT_SCENE_ROOM,
       lastX: initialX,
       lastY: initialY,
       targetX: initialX,
       targetY: initialY,
+      lastReceivedX: initialX,
+      lastReceivedY: initialY,
+      lastUpdateAt: Date.now(),
+      netVx: 0,
+      netVy: 0,
       movementHoldUntil: 0,
       lastSkinSource: null,
       skinEnabled: false,
@@ -1283,6 +1671,12 @@ export class Game {
     const nextX = Number.isFinite(player?.x) ? player.x : entry.lastX;
     const nextY = Number.isFinite(player?.y) ? player.y : entry.lastY;
     const facingRight = player?.facingRight !== false;
+    entry.isSitting = player?.isSitting === true;
+    entry.netVx = Number.isFinite(player?.vx) ? player.vx : 0;
+    entry.netVy = Number.isFinite(player?.vy) ? player.vy : 0;
+    entry.lastUpdateAt = Number.isFinite(player?.updatedAt) ? player.updatedAt : Date.now();
+    entry.lastReceivedX = nextX;
+    entry.lastReceivedY = nextY;
     const sceneRoom = typeof player?.sceneRoom === 'string' ? player.sceneRoom : DEFAULT_SCENE_ROOM;
     entry.sceneRoom = sceneRoom;
     entry.container.visible = this._isRemoteVisible(sceneRoom);
@@ -1317,23 +1711,61 @@ export class Game {
       this._app.stage.addChild(this._bg);
     }
 
+    if (!this._stars) {
+      this._stars = new PIXI.Graphics();
+      this._app.stage.addChild(this._stars);
+    }
+
+    if (!this._haze) {
+      this._haze = new PIXI.Graphics();
+      this._app.stage.addChild(this._haze);
+    }
+
     if (!this._floor) {
       this._floor = new PIXI.Graphics();
       this._app.stage.addChild(this._floor);
     }
 
+    this._app.stage.setChildIndex(this._bg, 0);
+    this._app.stage.setChildIndex(this._stars, 1);
+    this._app.stage.setChildIndex(this._haze, 2);
+    this._app.stage.setChildIndex(this._floor, 3);
+
     this._bg.clear();
-    this._bg.beginFill(scene.colors.sky);
-    this._bg.drawRect(0, 0, CONFIG.WIDTH, CONFIG.HEIGHT * 0.58);
-    this._bg.endFill();
-    this._bg.beginFill(scene.colors.mid);
-    this._bg.drawRect(0, CONFIG.HEIGHT * 0.58, CONFIG.WIDTH, CONFIG.HEIGHT * 0.42);
-    this._bg.endFill();
+    const skyHeight = Math.round(CONFIG.HEIGHT * 0.6);
+    drawVerticalGradient(this._bg, 0, 0, CONFIG.WIDTH, skyHeight, scene.colors.sky, scene.colors.mid, 18);
+    drawVerticalGradient(
+      this._bg,
+      0,
+      skyHeight,
+      CONFIG.WIDTH,
+      Math.max(1, CONFIG.FLOOR_Y - skyHeight),
+      scene.colors.mid,
+      scene.colors.floor,
+      12
+    );
+
+    this._stars.clear();
+    drawStarfield(this._stars, scene.id, CONFIG.WIDTH, Math.round(skyHeight * 0.95));
+
+    this._haze.clear();
+    const glowColor = lerpColor(scene.colors.sky, 0xffffff, 0.16);
+    this._haze.beginFill(glowColor, 0.12);
+    this._haze.drawCircle(CONFIG.WIDTH * 0.18, skyHeight * 0.35, CONFIG.WIDTH * 0.38);
+    this._haze.drawCircle(CONFIG.WIDTH * 0.72, skyHeight * 0.22, CONFIG.WIDTH * 0.3);
+    this._haze.endFill();
 
     this._floor.clear();
-    this._floor.beginFill(scene.colors.floor);
-    this._floor.drawRect(0, CONFIG.FLOOR_Y, CONFIG.WIDTH, CONFIG.HEIGHT - CONFIG.FLOOR_Y);
-    this._floor.endFill();
+    drawVerticalGradient(
+      this._floor,
+      0,
+      CONFIG.FLOOR_Y,
+      CONFIG.WIDTH,
+      CONFIG.HEIGHT - CONFIG.FLOOR_Y,
+      scene.colors.floor,
+      lerpColor(scene.colors.floor, 0x000000, 0.22),
+      10
+    );
     this._floor.lineStyle(2, scene.colors.floorLine, 0.85);
     this._floor.moveTo(0, CONFIG.FLOOR_Y + 1);
     this._floor.lineTo(CONFIG.WIDTH, CONFIG.FLOOR_Y + 1);

@@ -1,11 +1,6 @@
-const PART_KEYS = ['head', 'body', 'leg', 'tail'];
+import { loadSkeletonPartSizes } from './skeletonLayout.js';
 
-const PART_SIZES = {
-  head: [200, 200],
-  body: [180, 160],
-  leg: [80, 130],
-  tail: [80, 200],
-};
+const PART_KEYS = ['head', 'body', 'leg', 'tail'];
 
 function imageFromSource(source) {
   return new Promise((resolve, reject) => {
@@ -36,8 +31,9 @@ function shouldDecodeSource(source) {
   );
 }
 
-function fitImageToPartCanvas(image, partKey) {
-  const [targetW, targetH] = PART_SIZES[partKey] || [image.width || 1, image.height || 1];
+function fitImageToPartCanvas(image, partKey, partSizes) {
+  const resolved = partSizes?.[partKey];
+  const [targetW, targetH] = resolved || [image.width || 1, image.height || 1];
   const canvas = createCanvas(targetW, targetH);
   const ctx = canvas.getContext('2d');
 
@@ -55,10 +51,10 @@ function fitImageToPartCanvas(image, partKey) {
   return canvas;
 }
 
-async function sourceToPartCanvas(source, partKey) {
+async function sourceToPartCanvas(source, partKey, partSizes) {
   if (!shouldDecodeSource(source)) return null;
   const image = await imageFromSource(source);
-  return fitImageToPartCanvas(image, partKey);
+  return fitImageToPartCanvas(image, partKey, partSizes);
 }
 
 function pickLibraryEntry(partKey, partLibrary, selectedParts) {
@@ -94,11 +90,12 @@ export function canvasesToDataUrls(parts = {}) {
   return result;
 }
 
-export async function dataUrlsToCanvases(dataUrls = {}) {
+export async function dataUrlsToCanvases(dataUrls = {}, options = {}) {
   const result = {};
+  const partSizes = options.partSizes || await loadSkeletonPartSizes();
 
   for (const [key, source] of Object.entries(dataUrls)) {
-    const canvas = await sourceToPartCanvas(source, key);
+    const canvas = await sourceToPartCanvas(source, key, partSizes);
     if (!canvas) continue;
     result[key] = canvas;
   }
@@ -109,7 +106,8 @@ export async function dataUrlsToCanvases(dataUrls = {}) {
 export async function buildSkinCanvasesFromCat(catRecord = null) {
   if (!catRecord) return {};
 
-  const merged = await dataUrlsToCanvases(catRecord.skin_parts || {});
+  const partSizes = await loadSkeletonPartSizes();
+  const merged = await dataUrlsToCanvases(catRecord.skin_parts || {}, { partSizes });
   const partLibrary = catRecord.part_library || {};
   const selectedParts = catRecord.selected_parts || {};
 
@@ -120,7 +118,7 @@ export async function buildSkinCanvasesFromCat(catRecord = null) {
     if (!entry?.dataUrl) continue;
 
     try {
-      const canvas = await sourceToPartCanvas(entry.dataUrl, partKey);
+      const canvas = await sourceToPartCanvas(entry.dataUrl, partKey, partSizes);
       if (canvas) merged[partKey] = canvas;
     } catch {
       // Ignore invalid sources; game skeleton fallback will render this part.

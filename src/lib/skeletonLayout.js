@@ -5,6 +5,8 @@ const FALLBACK_LAYOUT = {
   tail: { x: 0, y: 0, rotation: 0, width: 207, height: 220 },
 };
 
+const PART_KEYS = ['head', 'body', 'leg', 'tail'];
+
 let layoutCache = null;
 let loadingPromise = null;
 
@@ -73,17 +75,25 @@ function normalizeAttachment(attachment, fallback) {
     ? parseMeshBounds(attachment?.vertices)
     : null;
 
+  const isMesh = attachment?.type === 'mesh';
+  const hasX = Number.isFinite(attachment?.x);
+  const hasY = Number.isFinite(attachment?.y);
+
   return {
-    x: Number.isFinite(attachment?.x)
+    x: hasX
       ? attachment.x
-      : Number.isFinite(meshBounds?.centerX)
-        ? meshBounds.centerX
-        : fallback.x,
-    y: Number.isFinite(attachment?.y)
+      : isMesh
+        ? 0
+        : Number.isFinite(meshBounds?.centerX)
+          ? meshBounds.centerX
+          : fallback.x,
+    y: hasY
       ? attachment.y
-      : Number.isFinite(meshBounds?.centerY)
-        ? meshBounds.centerY
-        : fallback.y,
+      : isMesh
+        ? 0
+        : Number.isFinite(meshBounds?.centerY)
+          ? meshBounds.centerY
+          : fallback.y,
     rotation: Number.isFinite(attachment?.rotation) ? attachment.rotation : fallback.rotation,
     width: Number.isFinite(attachment?.width)
       ? attachment.width
@@ -140,4 +150,24 @@ export async function loadSkeletonLayout() {
 
 export function getFallbackSkeletonLayout() {
   return FALLBACK_LAYOUT;
+}
+
+export function getSkeletonPartSizes(layout = null) {
+  const resolved = layout && typeof layout === 'object' ? layout : FALLBACK_LAYOUT;
+  const sizes = {};
+
+  PART_KEYS.forEach((partKey) => {
+    const fallback = FALLBACK_LAYOUT[partKey];
+    const entry = resolved?.[partKey] || fallback;
+    const width = Math.max(1, Math.round(Number(entry?.width) || fallback.width));
+    const height = Math.max(1, Math.round(Number(entry?.height) || fallback.height));
+    sizes[partKey] = [width, height];
+  });
+
+  return sizes;
+}
+
+export async function loadSkeletonPartSizes() {
+  const layout = await loadSkeletonLayout();
+  return getSkeletonPartSizes(layout);
 }

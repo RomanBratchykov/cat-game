@@ -1,12 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { getFallbackSkeletonLayout, loadSkeletonLayout } from '../lib/skeletonLayout.js';
-
-const PART_SIZES = {
-  head: [200, 200],
-  body: [180, 160],
-  leg: [80, 130],
-  tail: [80, 200],
-};
+import { getFallbackSkeletonLayout, loadSkeletonLayout, loadSkeletonPartSizes } from '../lib/skeletonLayout.js';
 
 const PART_KEYS = ['head', 'body', 'leg', 'tail'];
 
@@ -132,6 +125,10 @@ function mergePartLibraries(primary, fallback) {
   return merged;
 }
 
+function isDataUrl(value) {
+  return typeof value === 'string' && value.startsWith('data:image/');
+}
+
 function fileNameFromPath(path) {
   return String(path || '').split('/').pop() || '';
 }
@@ -218,9 +215,13 @@ function fitImageIntoCanvas(image, targetW, targetH) {
 async function decodeImageToCanvas(dataUrl, partKey = null) {
   const image = await decodeImage(dataUrl);
 
-  if (partKey && PART_SIZES[partKey]) {
-    const [targetW, targetH] = PART_SIZES[partKey];
-    return fitImageIntoCanvas(image, targetW, targetH);
+  if (partKey) {
+    const partSizes = await loadSkeletonPartSizes();
+    const resolved = partSizes?.[partKey];
+    if (resolved) {
+      const [targetW, targetH] = resolved;
+      return fitImageIntoCanvas(image, targetW, targetH);
+    }
   }
 
   const maxSide = 512;
@@ -310,6 +311,32 @@ function buildBundledDefaultPartLibrary() {
 
 const BUNDLED_DEFAULT_PART_LIBRARY = buildBundledDefaultPartLibrary();
 
+const BUNDLED_URLS_BY_PART = (() => {
+  const map = createEmptyPartLibrary();
+  PART_KEYS.forEach((partKey) => {
+    map[partKey] = new Set((BUNDLED_DEFAULT_PART_LIBRARY[partKey] || [])
+      .map((entry) => entry?.dataUrl)
+      .filter((url) => typeof url === 'string'));
+  });
+  return map;
+})();
+
+function normalizePartLibraryAgainstBundled(rawLibrary) {
+  const normalized = createEmptyPartLibrary();
+
+  PART_KEYS.forEach((partKey) => {
+    const allowedUrls = BUNDLED_URLS_BY_PART[partKey] || new Set();
+    const list = Array.isArray(rawLibrary?.[partKey]) ? rawLibrary[partKey] : [];
+
+    normalized[partKey] = list
+      .filter((item) => item && typeof item.dataUrl === 'string')
+      .filter((item) => isDataUrl(item.dataUrl) || allowedUrls.has(item.dataUrl))
+      .map((item) => ({ ...item }));
+  });
+
+  return normalized;
+}
+
 function loadInitialKitten(initialKitten = null) {
   if (initialKitten) {
     return {
@@ -334,7 +361,8 @@ function loadInitialKitten(initialKitten = null) {
 function loadInitialPartLibrary(initialPartLibrary = null) {
   if (initialPartLibrary) {
     const fromInitial = sanitizePartLibrary(initialPartLibrary);
-    return mergePartLibraries(fromInitial, BUNDLED_DEFAULT_PART_LIBRARY);
+    const normalized = normalizePartLibraryAgainstBundled(fromInitial);
+    return mergePartLibraries(normalized, BUNDLED_DEFAULT_PART_LIBRARY);
   }
 
   try {
@@ -345,7 +373,8 @@ function loadInitialPartLibrary(initialPartLibrary = null) {
 
     const parsed = JSON.parse(raw);
     const fromStorage = sanitizePartLibrary(parsed);
-    return mergePartLibraries(fromStorage, BUNDLED_DEFAULT_PART_LIBRARY);
+    const normalized = normalizePartLibraryAgainstBundled(fromStorage);
+    return mergePartLibraries(normalized, BUNDLED_DEFAULT_PART_LIBRARY);
   } catch {
     return clonePartLibrary(BUNDLED_DEFAULT_PART_LIBRARY);
   }

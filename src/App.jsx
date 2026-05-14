@@ -166,7 +166,10 @@ function normalizeRealtimePlayer(payload, fallbackPresenceKey = '') {
 
   const parsedX = Number(payload?.x);
   const parsedY = Number(payload?.y);
+  const parsedVx = Number(payload?.vx);
+  const parsedVy = Number(payload?.vy);
   const parsedUpdatedAt = Number(payload?.updatedAt);
+  const payloadIsSitting = payload?.isSitting === true;
 
   return {
     presenceKey,
@@ -174,7 +177,10 @@ function normalizeRealtimePlayer(payload, fallbackPresenceKey = '') {
     name: typeof payload?.name === 'string' ? payload.name : 'Cat player',
     x: Number.isFinite(parsedX) ? parsedX : CONFIG.WIDTH / 2,
     y: Number.isFinite(parsedY) ? parsedY : CONFIG.FLOOR_Y,
+    vx: Number.isFinite(parsedVx) ? parsedVx : 0,
+    vy: Number.isFinite(parsedVy) ? parsedVy : 0,
     facingRight: payload?.facingRight !== false,
+    isSitting: payloadIsSitting,
     sceneRoom: typeof payload?.sceneRoom === 'string' ? payload.sceneRoom : DEFAULT_SCENE_ROOM,
     updatedAt: Number.isFinite(parsedUpdatedAt) ? parsedUpdatedAt : Date.now(),
   };
@@ -291,6 +297,44 @@ const App = () => {
   const activeThemeSrcRef = useRef(null);
   const localSkinPayloadRef = useRef(null);
   const localSkinSignatureRef = useRef('');
+  const [viewportSize, setViewportSize] = useState(() => {
+    if (typeof window === 'undefined') {
+      return { width: 1440, height: 900 };
+    }
+    return {
+      width: window.innerWidth,
+      height: window.innerHeight,
+    };
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const updateViewportVars = () => {
+      const vh = window.innerHeight * 0.01;
+      const vw = window.innerWidth * 0.01;
+      document.documentElement.style.setProperty('--app-vh', `${vh}px`);
+      document.documentElement.style.setProperty('--app-vw', `${vw}px`);
+    };
+
+    const handleResize = () => {
+      updateViewportVars();
+      setViewportSize({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      });
+    };
+
+    updateViewportVars();
+
+    window.addEventListener('resize', handleResize, { passive: true });
+    window.addEventListener('orientationchange', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('orientationchange', handleResize);
+    };
+  }, []);
 
   const isMobileDevice = useMemo(() => {
     if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
@@ -302,6 +346,17 @@ const App = () => {
 
     return isMobileUa || hasTouchPoints || hasCoarsePointer;
   }, []);
+
+  const desktopRoomScale = useMemo(() => {
+    if (isMobileDevice) return 1;
+
+    const availableWidth = Math.max(320, viewportSize.width - 24);
+    const availableHeight = Math.max(360, viewportSize.height - 24);
+    const widthScale = availableWidth / 1280;
+    const heightScale = availableHeight / 860;
+
+    return Math.max(0.56, Math.min(1, widthScale, heightScale));
+  }, [isMobileDevice, viewportSize.height, viewportSize.width]);
 
   const supportsPointerEvents = useMemo(() => {
     return typeof window !== 'undefined' && 'PointerEvent' in window;
@@ -1466,6 +1521,7 @@ const App = () => {
       x: CONFIG.WIDTH / 2,
       y: CONFIG.FLOOR_Y,
       facingRight: true,
+      isSitting: false,
       sceneRoom: DEFAULT_SCENE_ROOM,
     };
 
@@ -1680,7 +1736,12 @@ const App = () => {
   }, [screen]);
 
   const roomWrapperStyle = useMemo(() => {
-    if (!isMobileDevice) return styles.roomWrapper;
+    if (!isMobileDevice) {
+      return {
+        ...styles.roomWrapper,
+        alignItems: 'center',
+      };
+    }
 
     return {
       ...styles.roomWrapper,
@@ -1690,13 +1751,26 @@ const App = () => {
     };
   }, [isMobileDevice]);
 
+  const roomScaleShellStyle = useMemo(() => {
+    if (isMobileDevice || desktopRoomScale >= 0.999) {
+      return styles.roomScaleShell;
+    }
+
+    return {
+      ...styles.roomScaleShell,
+      zoom: desktopRoomScale,
+      width: `${100 / desktopRoomScale}%`,
+      maxWidth: `${1280 / desktopRoomScale}px`,
+    };
+  }, [desktopRoomScale, isMobileDevice]);
+
   const canvasWrapperStyle = useMemo(() => {
     if (!isMobileDevice) return styles.canvasWrapper;
 
     return {
       ...styles.canvasWrapper,
       aspectRatio: '4 / 3',
-      maxHeight: '58dvh',
+      maxHeight: 'calc(var(--app-vh, 1vh) * 58)',
       minHeight: 260,
       borderRadius: 10,
     };
@@ -1717,6 +1791,24 @@ const App = () => {
     return {
       ...styles.chatSidebar,
       ...styles.chatSidebarMobile,
+    };
+  }, [isMobileDevice]);
+
+  const gameColumnStyle = useMemo(() => {
+    if (!isMobileDevice) return styles.gameColumn;
+
+    return {
+      ...styles.gameColumn,
+      ...styles.gameColumnMobile,
+    };
+  }, [isMobileDevice]);
+
+  const chatPoolStyle = useMemo(() => {
+    if (!isMobileDevice) return styles.chatPool;
+
+    return {
+      ...styles.chatPool,
+      ...styles.chatPoolMobile,
     };
   }, [isMobileDevice]);
 
@@ -1837,236 +1929,238 @@ const App = () => {
 
   return withBackground(
     <div style={roomWrapperStyle}>
-      <div style={styles.roomHeader}>
-        <div>
-          <h1 style={styles.roomTitle}>Room: {ROOM_NAME}</h1>
-          <p style={styles.sceneTitle}>Zone: {sceneInfo.title}</p>
-          <p style={styles.p}>
-            You are {catRecord?.name || 'My Cat'} | Online: {onlineCount}
-          </p>
-          <p style={styles.sceneHint}>{sceneInfo.hint}</p>
-          <div style={styles.miniStatRow}>
-            <span style={styles.miniStatChip}>🪙 {miniGameState.wallet}</span>
-            <span style={styles.miniStatChip}>🍖 {miniGameState.food}</span>
-            <span style={styles.miniStatChip}>💧 {miniGameState.water}</span>
-            <span style={styles.miniStatChip}>💤 {miniGameState.sleep}</span>
-          </div>
-          {personalNotice ? <p style={styles.personalNotice}>{personalNotice}</p> : null}
-        </div>
-
-        <div style={styles.roomActions}>
-          {musicBlocked ? (
-            <button type="button" style={styles.secondaryBtn} onClick={tryResumeThemeAudio}>
-              Enable music
-            </button>
-          ) : null}
-          {chatVoiceSupported ? (
-            <button
-              type="button"
-              style={chatVoiceEnabled ? styles.secondaryBtn : styles.voiceOffBtn}
-              onClick={() => setChatVoiceEnabled((prev) => !prev)}
-            >
-              {chatVoiceEnabled ? 'Voice on' : 'Voice off'}
-            </button>
-          ) : (
-            <span style={styles.voiceUnsupported}>Voice unavailable in this browser</span>
-          )}
-          <button type="button" style={styles.secondaryBtn} onClick={goToEditor}>
-            Edit cat
-          </button>
-          <button type="button" style={styles.secondaryBtn} onClick={copyRoomLink}>
-            {roomLinkCopied ? 'Copied room link' : 'Copy room link'}
-          </button>
-          <button type="button" style={styles.ghostBtn} onClick={handleLogout} disabled={busy}>
-            Logout
-          </button>
-        </div>
-      </div>
-
-      <div style={roomMainLayoutStyle}>
-        <aside style={chatSidebarStyle}>
-          <div style={styles.chatSidebarHeader}>
-            <strong style={styles.chatSidebarTitle}>Chat log</strong>
-            <span style={styles.chatSidebarHint}>
-              {isMobileDevice ? 'Tap C to toggle typing' : 'Press T to toggle typing'}
-            </span>
+      <div style={roomScaleShellStyle}>
+        <div style={styles.roomHeader}>
+          <div>
+            <h1 style={styles.roomTitle}>Room: {ROOM_NAME}</h1>
+            <p style={styles.sceneTitle}>Zone: {sceneInfo.title}</p>
+            <p style={styles.p}>
+              You are {catRecord?.name || 'My Cat'} | Online: {onlineCount}
+            </p>
+            <p style={styles.sceneHint}>{sceneInfo.hint}</p>
+            <div style={styles.miniStatRow}>
+              <span style={styles.miniStatChip}>🪙 {miniGameState.wallet}</span>
+              <span style={styles.miniStatChip}>🍖 {miniGameState.food}</span>
+              <span style={styles.miniStatChip}>💧 {miniGameState.water}</span>
+              <span style={styles.miniStatChip}>💤 {miniGameState.sleep}</span>
+            </div>
+            {personalNotice ? <p style={styles.personalNotice}>{personalNotice}</p> : null}
           </div>
 
-          {chatOpen ? (
-            <form style={styles.chatForm} onSubmit={handleChatSubmit}>
-              <input
-                ref={chatInputRef}
-                style={styles.chatInput}
-                type="text"
-                value={chatText}
-                maxLength={CHAT_MAX_LENGTH}
-                onChange={(event) => setChatText(event.target.value)}
-                placeholder="Say something..."
-              />
-              <div style={styles.chatFormActions}>
-                <button
-                  type="submit"
-                  style={styles.primaryBtn}
-                  disabled={!chatText.trim()}
-                >
-                  Send
-                </button>
-                <button
-                  type="button"
-                  style={styles.secondaryBtn}
-                  onClick={() => {
-                    setChatOpen(false);
-                    setChatText('');
-                  }}
-                >
-                  Exit chat
-                </button>
-              </div>
-            </form>
-          ) : (
-            <button
-              type="button"
-              style={{
-                ...styles.secondaryBtn,
-                ...styles.chatOpenBtn,
-              }}
-              onClick={() => setChatOpen(true)}
-            >
-              {isMobileDevice ? 'Open chat' : 'Open chat (T)'}
-            </button>
-          )}
-
-          <div style={styles.chatPool}>
-            {chatTimeline.length === 0 ? (
-              <span style={styles.chatPoolEmpty}>
-                {isMobileDevice ? 'No messages yet. Tap C to open chat.' : 'No messages yet. Press T to open chat.'}
-              </span>
+          <div style={styles.roomActions}>
+            {musicBlocked ? (
+              <button type="button" style={styles.secondaryBtn} onClick={tryResumeThemeAudio}>
+                Enable music
+              </button>
+            ) : null}
+            {chatVoiceSupported ? (
+              <button
+                type="button"
+                style={chatVoiceEnabled ? styles.secondaryBtn : styles.voiceOffBtn}
+                onClick={() => setChatVoiceEnabled((prev) => !prev)}
+              >
+                {chatVoiceEnabled ? 'Voice on' : 'Voice off'}
+              </button>
             ) : (
-              chatTimeline.map((item) => {
-                const senderLabel = item?.mine
-                  ? 'You'
-                  : (
-                    (typeof item?.connectionLabel === 'string' && item.connectionLabel)
-                      || (typeof item?.sender === 'string' && item.sender)
-                      || 'Cat player'
-                  );
+              <span style={styles.voiceUnsupported}>Voice unavailable in this browser</span>
+            )}
+            <button type="button" style={styles.secondaryBtn} onClick={goToEditor}>
+              Edit cat
+            </button>
+            <button type="button" style={styles.secondaryBtn} onClick={copyRoomLink}>
+              {roomLinkCopied ? 'Copied room link' : 'Copy room link'}
+            </button>
+            <button type="button" style={styles.ghostBtn} onClick={handleLogout} disabled={busy}>
+              Logout
+            </button>
+          </div>
+        </div>
 
-                return (
-                  <div
-                    key={item.id}
-                    style={{
-                      ...styles.chatLine,
-                      ...(item?.mine ? styles.chatLineMine : null),
+        <div style={roomMainLayoutStyle}>
+          <aside style={chatSidebarStyle}>
+            <div style={styles.chatSidebarHeader}>
+              <strong style={styles.chatSidebarTitle}>Chat log</strong>
+              <span style={styles.chatSidebarHint}>
+                {isMobileDevice ? 'Tap C to toggle typing' : 'Press T to toggle typing'}
+              </span>
+            </div>
+
+            {chatOpen ? (
+              <form style={styles.chatForm} onSubmit={handleChatSubmit}>
+                <input
+                  ref={chatInputRef}
+                  style={styles.chatInput}
+                  type="text"
+                  value={chatText}
+                  maxLength={CHAT_MAX_LENGTH}
+                  onChange={(event) => setChatText(event.target.value)}
+                  placeholder="Say something..."
+                />
+                <div style={styles.chatFormActions}>
+                  <button
+                    type="submit"
+                    style={styles.primaryBtn}
+                    disabled={!chatText.trim()}
+                  >
+                    Send
+                  </button>
+                  <button
+                    type="button"
+                    style={styles.secondaryBtn}
+                    onClick={() => {
+                      setChatOpen(false);
+                      setChatText('');
                     }}
                   >
-                    <span style={styles.chatLineSender}>{senderLabel}</span>
-                    <span style={styles.chatLineMessage}>{item?.message}</span>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </aside>
-
-        <div style={styles.gameColumn}>
-          <div style={canvasWrapperStyle}>
-            <canvas
-              ref={canvasRef}
-              style={{ display: 'block', width: '100%', height: '100%', touchAction: 'none' }}
-            />
-          </div>
-
-          {!isMobileDevice ? (
-            <div style={styles.helpRow}>
-              <span style={styles.key}>A / D</span>
-              <span style={styles.hint}>Move</span>
-              <span style={styles.key}>W</span>
-              <span style={styles.hint}>Jump</span>
-              <span style={styles.key}>E</span>
-              <span style={styles.hint}>Interact</span>
-              <span style={styles.key}>Ctrl</span>
-              <span style={styles.hint}>Sit</span>
-              <span style={styles.key}>T</span>
-              <span style={styles.hint}>Chat</span>
-            </div>
-          ) : (
-            <div style={styles.mobileHud}>
-              <div
-                style={styles.joystickBase}
-                onPointerDown={handleJoystickDown}
-                onPointerMove={handleJoystickMove}
-                onPointerUp={handleJoystickUp}
-                onPointerCancel={handleJoystickUp}
-                onPointerLeave={handleJoystickUp}
-                onLostPointerCapture={handleJoystickCaptureLost}
-                onTouchStart={handleJoystickTouchStart}
-                onTouchMove={handleJoystickTouchMove}
-                onTouchEnd={handleJoystickTouchEnd}
-                onTouchCancel={handleJoystickTouchEnd}
+                    Exit chat
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <button
+                type="button"
+                style={{
+                  ...styles.secondaryBtn,
+                  ...styles.chatOpenBtn,
+                }}
+                onClick={() => setChatOpen(true)}
               >
-                <div
-                  style={{
-                    ...styles.joystickKnob,
-                    transform: `translate(${joystickOffset.x}px, ${joystickOffset.y}px)`,
-                  }}
-                />
-              </div>
+                {isMobileDevice ? 'Open chat' : 'Open chat (T)'}
+              </button>
+            )}
 
-              <div style={styles.mobileActionStack}>
-                <button
-                  type="button"
-                  style={styles.mobileControlBtn}
-                  onPointerDown={handleMobileJumpDown}
-                  onPointerUp={handleMobileJumpUp}
-                  onPointerCancel={handleMobileJumpUp}
-                  onPointerLeave={handleMobileJumpUp}
-                  onLostPointerCapture={handleMobileJumpCaptureLost}
-                  onTouchStart={handleMobileJumpTouchDown}
-                  onTouchEnd={handleMobileJumpTouchUp}
-                  onTouchCancel={handleMobileJumpTouchUp}
-                >
-                  ^
-                </button>
-                <button
-                  type="button"
-                  style={styles.mobileControlBtn}
-                  onPointerDown={handleMobileSit}
-                  onTouchStart={handleMobileSitTouch}
-                >
-                  v
-                </button>
-                <button
-                  type="button"
-                  style={styles.mobileChatBtn}
-                  onPointerDown={handleMobileChat}
-                  onTouchStart={handleMobileChatTouch}
-                >
-                  C
-                </button>
-              </div>
-            </div>
-          )}
-
-          {remotePlayers.length > 0 ? (
-            <div style={styles.onlineList}>
-              {remotePlayers.map((player) => (
-                <span key={player.presenceKey || player.userId} style={styles.onlineItem}>
-                  {player.name}
+            <div style={chatPoolStyle}>
+              {chatTimeline.length === 0 ? (
+                <span style={styles.chatPoolEmpty}>
+                  {isMobileDevice ? 'No messages yet. Tap C to open chat.' : 'No messages yet. Press T to open chat.'}
                 </span>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      </div>
+              ) : (
+                chatTimeline.map((item) => {
+                  const senderLabel = item?.mine
+                    ? 'You'
+                    : (
+                      (typeof item?.connectionLabel === 'string' && item.connectionLabel)
+                        || (typeof item?.sender === 'string' && item.sender)
+                        || 'Cat player'
+                    );
 
-      {errorText ? <p style={styles.error}>{errorText}</p> : null}
+                  return (
+                    <div
+                      key={item.id}
+                      style={{
+                        ...styles.chatLine,
+                        ...(item?.mine ? styles.chatLineMine : null),
+                      }}
+                    >
+                      <span style={styles.chatLineSender}>{senderLabel}</span>
+                      <span style={styles.chatLineMessage}>{item?.message}</span>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </aside>
+
+          <div style={gameColumnStyle}>
+            <div style={canvasWrapperStyle}>
+              <canvas
+                ref={canvasRef}
+                style={{ display: 'block', width: '100%', height: '100%', touchAction: 'none' }}
+              />
+            </div>
+
+            {!isMobileDevice ? (
+              <div style={styles.helpRow}>
+                <span style={styles.key}>A / D</span>
+                <span style={styles.hint}>Move</span>
+                <span style={styles.key}>W</span>
+                <span style={styles.hint}>Jump</span>
+                <span style={styles.key}>E</span>
+                <span style={styles.hint}>Interact</span>
+                <span style={styles.key}>Ctrl</span>
+                <span style={styles.hint}>Sit</span>
+                <span style={styles.key}>T</span>
+                <span style={styles.hint}>Chat</span>
+              </div>
+            ) : (
+              <div style={styles.mobileHud}>
+                <div
+                  style={styles.joystickBase}
+                  onPointerDown={handleJoystickDown}
+                  onPointerMove={handleJoystickMove}
+                  onPointerUp={handleJoystickUp}
+                  onPointerCancel={handleJoystickUp}
+                  onPointerLeave={handleJoystickUp}
+                  onLostPointerCapture={handleJoystickCaptureLost}
+                  onTouchStart={handleJoystickTouchStart}
+                  onTouchMove={handleJoystickTouchMove}
+                  onTouchEnd={handleJoystickTouchEnd}
+                  onTouchCancel={handleJoystickTouchEnd}
+                >
+                  <div
+                    style={{
+                      ...styles.joystickKnob,
+                      transform: `translate(${joystickOffset.x}px, ${joystickOffset.y}px)`,
+                    }}
+                  />
+                </div>
+
+                <div style={styles.mobileActionStack}>
+                  <button
+                    type="button"
+                    style={styles.mobileControlBtn}
+                    onPointerDown={handleMobileJumpDown}
+                    onPointerUp={handleMobileJumpUp}
+                    onPointerCancel={handleMobileJumpUp}
+                    onPointerLeave={handleMobileJumpUp}
+                    onLostPointerCapture={handleMobileJumpCaptureLost}
+                    onTouchStart={handleMobileJumpTouchDown}
+                    onTouchEnd={handleMobileJumpTouchUp}
+                    onTouchCancel={handleMobileJumpTouchUp}
+                  >
+                    ^
+                  </button>
+                  <button
+                    type="button"
+                    style={styles.mobileControlBtn}
+                    onPointerDown={handleMobileSit}
+                    onTouchStart={handleMobileSitTouch}
+                  >
+                    v
+                  </button>
+                  <button
+                    type="button"
+                    style={styles.mobileChatBtn}
+                    onPointerDown={handleMobileChat}
+                    onTouchStart={handleMobileChatTouch}
+                  >
+                    C
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {remotePlayers.length > 0 ? (
+              <div style={styles.onlineList}>
+                {remotePlayers.map((player) => (
+                  <span key={player.presenceKey || player.userId} style={styles.onlineItem}>
+                    {player.name}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        {errorText ? <p style={styles.error}>{errorText}</p> : null}
+      </div>
     </div>
   );
 };
 
 const styles = {
   centeredWrapper: {
-    minHeight: '100vh',
+    minHeight: 'calc(var(--app-vh, 1vh) * 100)',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -2185,7 +2279,7 @@ const styles = {
     color: '#ffb8b8',
   },
   roomWrapper: {
-    minHeight: '100dvh',
+    minHeight: 'calc(var(--app-vh, 1vh) * 100)',
     background: 'transparent',
     color: '#edf0ff',
     padding: 14,
@@ -2195,6 +2289,15 @@ const styles = {
     flexDirection: 'column',
     gap: 12,
     overflowY: 'auto',
+  },
+  roomScaleShell: {
+    width: '100%',
+    maxWidth: 1280,
+    margin: '0 auto',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 12,
+    minWidth: 0,
   },
   roomHeader: {
     maxWidth: 1280,
@@ -2256,14 +2359,15 @@ const styles = {
     width: '100%',
     margin: '0 auto',
     display: 'grid',
-    gridTemplateColumns: '320px minmax(0, 1fr)',
+    gridTemplateColumns: 'minmax(250px, 320px) minmax(0, 1fr)',
     gap: 12,
-    alignItems: 'stretch',
+    alignItems: 'start',
     minHeight: 0,
   },
   roomMainLayoutMobile: {
     display: 'flex',
     flexDirection: 'column',
+    gap: 10,
   },
   chatSidebar: {
     border: '1px solid rgba(255,255,255,0.16)',
@@ -2274,10 +2378,12 @@ const styles = {
     flexDirection: 'column',
     gap: 10,
     minHeight: 0,
-    maxHeight: 'calc(100dvh - 190px)',
+    maxHeight: 'calc(var(--app-vh, 1vh) * 100 - 190px)',
   },
   chatSidebarMobile: {
-    maxHeight: 'none',
+    order: 2,
+    maxHeight: 'min(320px, calc(var(--app-vh, 1vh) * 42))',
+    padding: 8,
   },
   chatSidebarHeader: {
     display: 'flex',
@@ -2299,6 +2405,9 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     gap: 12,
+  },
+  gameColumnMobile: {
+    order: 1,
   },
   kittenGamePanel: {
     border: '1px solid rgba(255,255,255,0.16)',
@@ -2385,7 +2494,7 @@ const styles = {
     boxShadow: '0 0 40px rgba(80,80,200,0.15)',
     width: '100%',
     aspectRatio: '16 / 10',
-    maxHeight: '64dvh',
+    maxHeight: 'calc(var(--app-vh, 1vh) * 64)',
     lineHeight: 0,
     background: '#0e1320',
   },
@@ -2448,7 +2557,7 @@ const styles = {
     display: 'grid',
     gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
     gap: 10,
-    width: 'min(280px, calc(100% - 136px))',
+    width: 'min(250px, calc(100% - 136px))',
     touchAction: 'manipulation',
   },
   mobileControlBtn: {
@@ -2527,6 +2636,11 @@ const styles = {
     flex: 1,
     minHeight: 170,
     overflowY: 'auto',
+  },
+  chatPoolMobile: {
+    flex: 'unset',
+    minHeight: 120,
+    maxHeight: 'min(190px, calc(var(--app-vh, 1vh) * 24))',
   },
   chatPoolEmpty: {
     fontSize: 12,

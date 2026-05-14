@@ -39,6 +39,20 @@ export class CatMovementSystem extends System {
       const phys  = entity.get(PhysicsComponent);
       const tf    = entity.get(TransformComponent);
 
+      const rawMoveMultiplier = Number.isFinite(input.moveSpeedMultiplier)
+        ? input.moveSpeedMultiplier
+        : 1;
+      const rawJumpMultiplier = Number.isFinite(input.jumpMultiplier)
+        ? input.jumpMultiplier
+        : 1;
+      const moveMultiplier = Math.max(0.35, Math.min(1, rawMoveMultiplier));
+      const jumpMultiplier = Math.max(0.5, Math.min(1, rawJumpMultiplier));
+      const moveSpeed = CONFIG.MOVE_SPEED * moveMultiplier;
+      const airSteer = CONFIG.AIR_STEER * moveMultiplier;
+      const jumpForward = CONFIG.JUMP_FORCE_FORWARD * jumpMultiplier;
+      const jumpVertical = CONFIG.JUMP_FORCE_VERTICAL * jumpMultiplier;
+      const jumpHorizontal = CONFIG.JUMP_HORIZONTAL * jumpMultiplier;
+
       // Сидіння блокує весь рух
       if (input.isSitting) continue;
 
@@ -64,13 +78,13 @@ export class CatMovementSystem extends System {
 
       // ── Горизонтальний рух ────────────────────────────────────
       if (phys.onGround) {
-        if (left)  phys.vx = -CONFIG.MOVE_SPEED;
-        else if (right) phys.vx = CONFIG.MOVE_SPEED;
+        if (left)  phys.vx = -moveSpeed;
+        else if (right) phys.vx = moveSpeed;
         else phys.vx = 0;
       } else {
         // В повітрі — легке керування (air steer)
-        if (left)  phys.vx = Math.max(phys.vx - CONFIG.AIR_STEER, -CONFIG.MOVE_SPEED);
-        if (right) phys.vx = Math.min(phys.vx + CONFIG.AIR_STEER,  CONFIG.MOVE_SPEED);
+        if (left)  phys.vx = Math.max(phys.vx - airSteer, -moveSpeed);
+        if (right) phys.vx = Math.min(phys.vx + airSteer,  moveSpeed);
       }
 
       // ── Стрибок ───────────────────────────────────────────────
@@ -78,11 +92,11 @@ export class CatMovementSystem extends System {
         phys.onGround = false;
         const moving  = left || right;
         if (moving) {
-          phys.vy = -CONFIG.JUMP_FORCE_FORWARD;
-          phys.vx = input.facingRight ? CONFIG.JUMP_HORIZONTAL : -CONFIG.JUMP_HORIZONTAL;
+          phys.vy = -jumpForward;
+          phys.vx = input.facingRight ? jumpHorizontal : -jumpHorizontal;
           console.log('[CAT] Forward jump');
         } else {
-          phys.vy = -CONFIG.JUMP_FORCE_VERTICAL;
+          phys.vy = -jumpVertical;
           phys.vx = 0;
           console.log('[CAT] Vertical jump');
         }

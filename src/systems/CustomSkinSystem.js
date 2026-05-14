@@ -198,21 +198,15 @@ export class CustomSkinSystem extends System {
   _makeSprite(texture, cfg, trim, att) {
     const sprite = new PIXI.Sprite(texture);
 
-    // Keep the original image center after trimming transparent bounds.
-    // This preserves attachment alignment for padded uploads.
-    const sourceW = Math.max(1, trim.sourceW || trim.w);
-    const sourceH = Math.max(1, trim.sourceH || trim.h);
-    const anchorX = (sourceW * 0.5 - trim.minX) / Math.max(1, trim.w);
-    const anchorY = (sourceH * 0.5 - trim.minY) / Math.max(1, trim.h);
-    sprite.anchor.set(anchorX, anchorY);
+    // Anchor to trimmed content center so transparent padding does not shift alignment.
+    sprite.anchor.set(0.5, 0.5);
 
-    // Scale: attachment size (Spine units) / source canvas size (px)
-    // Тому що parent має scale(0.5):
-    //   screen px = (canvas px) * sprite.scale * 0.5
-    //             = canvas px * (att.w / srcW) * 0.5
-    //             = att.w * 0.5 screen px per Spine unit ✓
-    const sx = (att.w / sourceW) * (cfg.scale ?? 1);
-    const sy = (att.h / sourceH) * (cfg.scale ?? 1);
+    // Scale: attachment size (Spine units) / trimmed content size (px)
+    // This keeps the visible pixels aligned to the skeleton attachment size.
+    const baseW = Math.max(1, trim.w);
+    const baseH = Math.max(1, trim.h);
+    const sx = (att.w / baseW) * (cfg.scale ?? 1);
+    const sy = (att.h / baseH) * (cfg.scale ?? 1);
     sprite.scale.set(
       Math.min(8, Math.max(0.01, sx)),
       Math.min(8, Math.max(0.01, sy)),

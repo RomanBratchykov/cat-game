@@ -102,6 +102,8 @@ export class InputComponent extends Component {
     this.isSitting     = false;
     this.sitPending    = false; // черговий запит сісти/встати
     this.facingRight   = true;
+    this.moveSpeedMultiplier = 1;
+    this.jumpMultiplier = 1;
   }
 }
 
