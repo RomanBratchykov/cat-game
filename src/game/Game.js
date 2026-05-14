@@ -75,8 +75,10 @@ const SLEEP_REFILL = 32;
 const TOWER_START_OFFSET_PX = 140;
 const TOWER_TARGET_SCREEN_Y = 220;
 const TOWER_CAMERA_LERP = 0.18;
-const TOWER_PLATFORM_MIN_GAP = 86;
-const TOWER_PLATFORM_MAX_GAP = 138;
+const TOWER_SECTOR_HEIGHT = 128;
+const TOWER_SECTOR_Y_JITTER_PX = 16;
+const TOWER_LANE_JITTER_PX = 26;
+const TOWER_EXTRA_LANE_CHANCE = 0.4;
 const TOWER_PLATFORM_MIN_WIDTH = 96;
 const TOWER_PLATFORM_MAX_WIDTH = 180;
 const TOWER_SIDE_PADDING = 54;
@@ -919,6 +921,9 @@ export class Game {
   _renderSceneObjects() {
     if (!this._sceneObjectLayer) return;
 
+    this._clearTowerPlatforms();
+    this._clearTowerPickups();
+
     const previousChildren = this._sceneObjectLayer.removeChildren();
     previousChildren.forEach((child) => {
       child.destroy({ children: true, texture: false, baseTexture: false });
@@ -1039,7 +1044,8 @@ export class Game {
 
     const scene = getSceneRoom(this._sceneRoomId);
     const now = Date.now();
-    const inTower = tf.y < CONFIG.FLOOR_Y - TOWER_START_OFFSET_PX;
+    const footY = this._getCatFootY(tf);
+    const inTower = footY < CONFIG.FLOOR_Y - TOWER_START_OFFSET_PX;
     const canTransition = !inTower && now - this._lastSceneTransitionAt > SCENE_TRANSITION_COOLDOWN_MS;
 
     if (canTransition) {
@@ -1097,6 +1103,13 @@ export class Game {
     }
 
     return closest;
+  }
+
+  _getCatFootY(tf) {
+    const spine = this._catEntity?.get(SpineComponent);
+    const floorOffset = spine?.floorOffset ?? 0;
+    const scaleY = spine?.instance?.scale?.y ?? 0.5;
+    return tf.y + floorOffset * Math.abs(scaleY);
   }
 
   _isWithinPlatformSupport(platform, tf) {
@@ -1500,17 +1513,21 @@ export class Game {
     const tf = this._catEntity.get(TransformComponent);
     if (!tf) return;
 
-    this._updateCamera(tf);
-    this._ensureTowerPlatforms(tf);
-    this._cullTowerPlatforms(tf);
+    const footY = this._getCatFootY(tf);
+    this._updateCamera(footY);
+    this._ensureTowerPlatforms(footY);
+    this._cullTowerPlatforms(footY);
   }
 
-  _updateCamera(tf) {
+  _updateCamera(footY) {
     if (!this._worldLayer) return;
 
     const climbStartY = CONFIG.FLOOR_Y - TOWER_START_OFFSET_PX;
-    const targetOffset = tf.y < climbStartY ? TOWER_TARGET_SCREEN_Y - tf.y : 0;
+    const targetOffset = footY < climbStartY ? TOWER_TARGET_SCREEN_Y - footY : 0;
     this._cameraOffsetY = lerp(this._cameraOffsetY, targetOffset, TOWER_CAMERA_LERP);
+    if (targetOffset === 0 && Math.abs(this._cameraOffsetY) < 0.6) {
+      this._cameraOffsetY = 0;
+    }
     this._worldLayer.y = Math.round(this._cameraOffsetY);
   }
 
@@ -1529,6 +1546,8 @@ export class Game {
       : CONFIG.FLOOR_Y;
     const tf = this._catEntity?.get(TransformComponent);
     const lastX = tf?.x ?? CONFIG.WIDTH / 2;
+    const laneXs = this._getTowerLaneXs();
+    const seedLane = this._getNearestLaneIndex(lastX, laneXs);
 
     this._towerState = {
       platforms: [],
@@ -1537,11 +1556,13 @@ export class Game {
       nextPickupId: 0,
       highestY: highestBase,
       lastX,
+      sectorCursorY: highestBase - TOWER_SECTOR_HEIGHT,
+      lastSectorLanes: [seedLane],
     };
 
-    const initialCount = Math.max(6, Math.round(CONFIG.HEIGHT / 78));
-    for (let i = 0; i < initialCount; i += 1) {
-      this._spawnTowerPlatform();
+    const initialSectors = Math.max(6, Math.round(CONFIG.HEIGHT / TOWER_SECTOR_HEIGHT) + 2);
+    for (let i = 0; i < initialSectors; i += 1) {
+      this._spawnTowerSector();
     }
 
     this._cameraOffsetY = 0;
@@ -1556,8 +1577,15 @@ export class Game {
     if (!this._towerState?.platforms) return;
 
     this._towerState.platforms.forEach((platform) => {
-      platform.gfx?.parent?.removeChild(platform.gfx);
-      platform.gfx?.destroy({ children: true, texture: false, baseTexture: false });
+      if (!platform.gfx) return;
+      if (!platform.gfx.destroyed) {
+        if (platform.gfx && !platform.gfx.destroyed) {
+          platform.gfx.parent?.removeChild(platform.gfx);
+          platform.gfx.destroy({ children: true, texture: false, baseTexture: false });
+        }
+        platform.gfx = null;
+      }
+      platform.gfx = null;
     });
     this._towerState.platforms = [];
   }
@@ -1566,42 +1594,115 @@ export class Game {
     if (!this._towerState?.pickups) return;
 
     this._towerState.pickups.forEach((pickup) => {
-      pickup.gfx?.parent?.removeChild(pickup.gfx);
-      pickup.gfx?.destroy({ children: true, texture: false, baseTexture: false });
+      if (!pickup.gfx) return;
+      if (!pickup.gfx.destroyed) {
+        pickup.gfx.parent?.removeChild(pickup.gfx);
+        pickup.gfx.destroy({ children: true, texture: false, baseTexture: false });
+      }
+      pickup.gfx = null;
     });
     this._towerState.pickups = [];
   }
 
-  _ensureTowerPlatforms(tf) {
+  _getTowerLaneXs() {
+    const minX = TOWER_SIDE_PADDING;
+    const maxX = Math.max(minX + 120, CONFIG.WIDTH - TOWER_SIDE_PADDING);
+    const span = maxX - minX;
+    return [
+      minX + span * 0.2,
+      minX + span * 0.5,
+      minX + span * 0.8,
+    ];
+  }
+
+  _getNearestLaneIndex(x, laneXs) {
+    let bestIndex = 0;
+    let bestDist = Number.POSITIVE_INFINITY;
+    laneXs.forEach((laneX, index) => {
+      const dist = Math.abs(x - laneX);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIndex = index;
+      }
+    });
+    return bestIndex;
+  }
+
+  _buildNextLaneSet(prevLanes, laneCount) {
+    const laneSet = new Set();
+    const maxIndex = Math.max(0, laneCount - 1);
+
+    prevLanes.forEach((lane) => {
+      const shift = Math.floor(Math.random() * 3) - 1;
+      const nextLane = Math.max(0, Math.min(maxIndex, lane + shift));
+      laneSet.add(nextLane);
+    });
+
+    if (laneSet.size < laneCount && Math.random() < TOWER_EXTRA_LANE_CHANCE) {
+      const candidates = [];
+      laneSet.forEach((lane) => {
+        if (lane - 1 >= 0) candidates.push(lane - 1);
+        if (lane + 1 <= maxIndex) candidates.push(lane + 1);
+      });
+      const unique = candidates.filter((lane) => !laneSet.has(lane));
+      if (unique.length > 0) {
+        laneSet.add(unique[Math.floor(Math.random() * unique.length)]);
+      }
+    }
+
+    return [...laneSet];
+  }
+
+  _ensureTowerPlatforms(footY) {
     if (!this._towerState) return;
 
-    const spawnTargetY = tf.y - TOWER_SPAWN_AHEAD_PX;
-    while (this._towerState.highestY > spawnTargetY) {
-      this._spawnTowerPlatform();
+    const spawnTargetY = footY - TOWER_SPAWN_AHEAD_PX;
+    while (this._towerState.sectorCursorY > spawnTargetY) {
+      this._spawnTowerSector();
     }
 
     this._syncScenePlatforms();
   }
 
-  _spawnTowerPlatform() {
+  _spawnTowerSector() {
+    if (!this._sceneObjectLayer || !this._towerState) return;
+
+    const laneXs = this._getTowerLaneXs();
+    const prevLanes = this._towerState.lastSectorLanes?.length
+      ? this._towerState.lastSectorLanes
+      : [this._getNearestLaneIndex(this._towerState.lastX, laneXs)];
+    const lanes = this._buildNextLaneSet(prevLanes, laneXs.length);
+
+    const sectorTopY = this._towerState.sectorCursorY;
+    const sectorBottomY = sectorTopY + TOWER_SECTOR_HEIGHT;
+    const baseY = sectorTopY + TOWER_SECTOR_HEIGHT * (0.4 + Math.random() * 0.25);
+
+    lanes.forEach((laneIndex) => {
+      const width = Math.round(
+        TOWER_PLATFORM_MIN_WIDTH
+          + Math.random() * (TOWER_PLATFORM_MAX_WIDTH - TOWER_PLATFORM_MIN_WIDTH)
+      );
+      const halfW = width / 2;
+      const laneX = laneXs[laneIndex] ?? laneXs[1] ?? CONFIG.WIDTH / 2;
+      const jitter = (Math.random() * 2 - 1) * TOWER_LANE_JITTER_PX;
+      const minX = TOWER_SIDE_PADDING + halfW;
+      const maxX = Math.max(minX + 40, CONFIG.WIDTH - TOWER_SIDE_PADDING - halfW);
+      const x = Math.round(Math.max(minX, Math.min(maxX, laneX + jitter)));
+      const yJitter = (Math.random() * 2 - 1) * TOWER_SECTOR_Y_JITTER_PX;
+      const y = Math.round(Math.max(sectorTopY + 12, Math.min(sectorBottomY - 12, baseY + yJitter)));
+
+      this._spawnTowerPlatformAt(x, y, width);
+      this._towerState.lastX = x;
+    });
+
+    this._towerState.lastSectorLanes = lanes;
+    this._towerState.sectorCursorY -= TOWER_SECTOR_HEIGHT;
+  }
+
+  _spawnTowerPlatformAt(x, y, width) {
     if (!this._sceneObjectLayer || !this._towerState) return null;
 
-    const width = Math.round(
-      TOWER_PLATFORM_MIN_WIDTH
-        + Math.random() * (TOWER_PLATFORM_MAX_WIDTH - TOWER_PLATFORM_MIN_WIDTH)
-    );
     const halfW = width / 2;
-    const minX = TOWER_SIDE_PADDING + halfW;
-    const maxX = Math.max(minX + 40, CONFIG.WIDTH - TOWER_SIDE_PADDING - halfW);
-    const prevX = Number.isFinite(this._towerState.lastX) ? this._towerState.lastX : CONFIG.WIDTH / 2;
-    const stepX = (Math.random() * 2 - 1) * 180;
-    const x = Math.round(Math.max(minX, Math.min(maxX, prevX + stepX)));
-    const gap = Math.round(
-      TOWER_PLATFORM_MIN_GAP
-        + Math.random() * (TOWER_PLATFORM_MAX_GAP - TOWER_PLATFORM_MIN_GAP)
-    );
-    const y = Math.round(this._towerState.highestY - gap);
-
     const gfx = this._createPlatformGfx(width);
     gfx.x = x;
     gfx.y = y;
@@ -1619,9 +1720,7 @@ export class Game {
     };
 
     this._towerState.platforms.push(platform);
-    this._towerState.highestY = y;
-    this._towerState.lastX = x;
-
+    this._towerState.highestY = Math.min(this._towerState.highestY, y);
     this._maybeSpawnTowerPickup(platform);
     return platform;
   }
@@ -1692,10 +1791,10 @@ export class Game {
     return gfx;
   }
 
-  _cullTowerPlatforms(tf) {
+  _cullTowerPlatforms(footY) {
     if (!this._towerState) return;
 
-    const cutoffY = tf.y + TOWER_CULL_BELOW_PX;
+    const cutoffY = footY + TOWER_CULL_BELOW_PX;
     let changed = false;
 
     for (let index = this._towerState.platforms.length - 1; index >= 0; index -= 1) {
@@ -1706,8 +1805,11 @@ export class Game {
         this._activePlatformId = null;
       }
 
-      platform.gfx?.parent?.removeChild(platform.gfx);
-      platform.gfx?.destroy({ children: true, texture: false, baseTexture: false });
+      if (platform.gfx && !platform.gfx.destroyed) {
+        platform.gfx.parent?.removeChild(platform.gfx);
+        platform.gfx.destroy({ children: true, texture: false, baseTexture: false });
+      }
+      platform.gfx = null;
       this._towerState.platforms.splice(index, 1);
       changed = true;
     }
@@ -1716,8 +1818,11 @@ export class Game {
       const pickup = this._towerState.pickups[index];
       if (pickup.y <= cutoffY) continue;
 
-      pickup.gfx?.parent?.removeChild(pickup.gfx);
-      pickup.gfx?.destroy({ children: true, texture: false, baseTexture: false });
+      if (pickup.gfx && !pickup.gfx.destroyed) {
+        pickup.gfx.parent?.removeChild(pickup.gfx);
+        pickup.gfx.destroy({ children: true, texture: false, baseTexture: false });
+      }
+      pickup.gfx = null;
       this._towerState.pickups.splice(index, 1);
     }
 
@@ -1751,8 +1856,11 @@ export class Game {
         message = `Sip +${Math.round(gain)} water.`;
       }
 
-      pickup.gfx?.parent?.removeChild(pickup.gfx);
-      pickup.gfx?.destroy({ children: true, texture: false, baseTexture: false });
+      if (pickup.gfx && !pickup.gfx.destroyed) {
+        pickup.gfx.parent?.removeChild(pickup.gfx);
+        pickup.gfx.destroy({ children: true, texture: false, baseTexture: false });
+      }
+      pickup.gfx = null;
       this._towerState.pickups.splice(index, 1);
       collected += 1;
 

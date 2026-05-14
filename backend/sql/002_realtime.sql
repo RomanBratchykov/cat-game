@@ -4,5 +4,5 @@
 alter publication supabase_realtime add table public.cats;
 
 -- Presence channel used by app:
--- channel name: cat-room-main
+-- channel name: pawland-room-main
 -- No SQL table is required for Presence state.

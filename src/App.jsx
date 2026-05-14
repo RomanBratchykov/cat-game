@@ -34,7 +34,7 @@ const ROOM_NAME =
     .trim()
     .toLowerCase() ||
   'main';
-const ROOM_CHANNEL = `cat-room-${ROOM_NAME}`;
+const ROOM_CHANNEL = `pawland-room-${ROOM_NAME}`;
 const AUTH_EMAIL_REDIRECT_TO = typeof import.meta.env.VITE_AUTH_REDIRECT_TO === 'string'
   ? import.meta.env.VITE_AUTH_REDIRECT_TO.trim()
   : '';
@@ -174,7 +174,7 @@ function normalizeRealtimePlayer(payload, fallbackPresenceKey = '') {
   return {
     presenceKey,
     userId: payloadUserId || presenceKey,
-    name: typeof payload?.name === 'string' ? payload.name : 'Cat player',
+    name: typeof payload?.name === 'string' ? payload.name : 'Pawland player',
     x: Number.isFinite(parsedX) ? parsedX : CONFIG.WIDTH / 2,
     y: Number.isFinite(parsedY) ? parsedY : CONFIG.FLOOR_Y,
     vx: Number.isFinite(parsedVx) ? parsedVx : 0,
@@ -1839,8 +1839,8 @@ const App = () => {
     return withBackground(
       <div style={styles.centeredWrapper}>
         <form style={styles.card} onSubmit={handleAuthSubmit}>
-          <h1 style={styles.h1}>Welcome to Cat Room</h1>
-          <p style={styles.p}>Start with registration, then create your cat and join the online room.</p>
+          <h1 style={styles.h1}>Welcome to Pawland</h1>
+          <p style={styles.p}>Start with registration, then create your cat and join Pawland.</p>
 
           <div style={styles.modeRow}>
             <button

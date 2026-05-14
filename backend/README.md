@@ -35,7 +35,7 @@ Then restart `npm run dev`.
 ## Notes
 
 - Authentication is handled by Supabase Auth (`auth.users`).
-- The frontend joins an online room using Supabase Realtime Presence (`cat-room-main` channel).
+- The frontend joins an online room using Supabase Realtime Presence (`pawland-room-main` channel).
 - Presence state is ephemeral and not permanently stored in PostgreSQL.
 
 ## Troubleshooting: "Error sending confirmation email"
