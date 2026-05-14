@@ -120,9 +120,10 @@ export class PetSystem extends System {
 import * as PIXI from 'pixi.js';
 
 export class HeartSystem extends System {
-  constructor(app) {
+  constructor(app, parent = null) {
     super();
     this._app    = app;
+    this._parent = parent || app.stage;
     this._pixiMap = new Map(); // entityId → PIXI.Graphics
   }
 
@@ -136,7 +137,7 @@ export class HeartSystem extends System {
       // Створюємо Pixi графіку при першому кадрі
       if (!this._pixiMap.has(entity.id)) {
         const g = this._createHeartGfx();
-        this._app.stage.addChild(g);
+        this._parent.addChild(g);
         this._pixiMap.set(entity.id, g);
       }
 
@@ -152,7 +153,7 @@ export class HeartSystem extends System {
 
       // Видаляємо коли life <= 0
       if (heart.life <= 0) {
-        this._app.stage.removeChild(g);
+        this._parent.removeChild(g);
         this._pixiMap.delete(entity.id);
         this.world.removeEntity(entity);
       }
@@ -170,7 +171,7 @@ export class HeartSystem extends System {
   }
 
   destroy() {
-    this._pixiMap.forEach(g => this._app.stage.removeChild(g));
+    this._pixiMap.forEach(g => this._parent.removeChild(g));
     this._pixiMap.clear();
   }
 }

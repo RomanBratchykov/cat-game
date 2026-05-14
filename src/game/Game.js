@@ -72,6 +72,24 @@ const FOOD_MEAL_COST = 3;
 const FOOD_MEAL_REFILL = 38;
 const WATER_REFILL = 34;
 const SLEEP_REFILL = 32;
+const TOWER_START_OFFSET_PX = 140;
+const TOWER_TARGET_SCREEN_Y = 220;
+const TOWER_CAMERA_LERP = 0.18;
+const TOWER_PLATFORM_MIN_GAP = 86;
+const TOWER_PLATFORM_MAX_GAP = 138;
+const TOWER_PLATFORM_MIN_WIDTH = 96;
+const TOWER_PLATFORM_MAX_WIDTH = 180;
+const TOWER_SIDE_PADDING = 54;
+const TOWER_SPAWN_AHEAD_PX = 650;
+const TOWER_CULL_BELOW_PX = 520;
+const TOWER_PICKUP_RADIUS_PX = 28;
+const TOWER_PICKUP_FOOD_REFILL = 26;
+const TOWER_PICKUP_WATER_REFILL = 26;
+const TOWER_PICKUP_FOOD_CHANCE = 0.16;
+const TOWER_PICKUP_WATER_CHANCE = 0.16;
+const TOWER_RESET_FOOD = 44;
+const TOWER_RESET_WATER = 44;
+const TOWER_RESET_SLEEP = 36;
 
 const SCENE_ROOMS = {
   courtyard: {
@@ -585,17 +603,22 @@ export class Game {
     this._sceneRoomId = DEFAULT_SCENE_ROOM;
     this._sceneObjects = [];
     this._scenePlatforms = [];
+    this._basePlatforms = [];
     this._sceneRopes = [];
     this._lastSceneTransitionAt = 0;
     this._interactConsumed = false;
     this._sceneObjectLayer = null;
     this._coinLayer = null;
+    this._pickupLayer = null;
+    this._worldLayer = null;
     this._coins = [];
     this._coinIdCounter = 0;
     this._lastCoinSpawnAt = Date.now();
     this._activeRopeId = null;
     this._activePlatformId = null;
     this._lastCatY = CONFIG.FLOOR_Y;
+    this._cameraOffsetY = 0;
+    this._towerState = null;
     this._economy = {
       wallet: 0,
       food: 78,
@@ -625,13 +648,19 @@ export class Game {
     this._catEntity  = null;
     this._pendingSkin = null;
 
+    this._worldLayer = new PIXI.Container();
+    this._app.stage.addChild(this._worldLayer);
+
     this._drawBackground();
 
     this._sceneObjectLayer = new PIXI.Container();
-    this._app.stage.addChild(this._sceneObjectLayer);
+    this._worldLayer.addChild(this._sceneObjectLayer);
     this._coinLayer = new PIXI.Container();
-    this._app.stage.addChild(this._coinLayer);
+    this._worldLayer.addChild(this._coinLayer);
+    this._pickupLayer = new PIXI.Container();
+    this._worldLayer.addChild(this._pickupLayer);
     this._renderSceneObjects();
+    this._resetTower();
     this._emitSceneChanged();
 
     window.addEventListener('resize', this._onResize);
@@ -659,7 +688,7 @@ export class Game {
       .addSystem(new ShakeSystem())
       .addSystem(new AnimationSystem())
       .addSystem(petSystem)
-      .addSystem(new HeartSystem(this._app))
+      .addSystem(new HeartSystem(this._app, this._worldLayer))
       .addSystem(audioSystem)
       .addSystem(new RenderSystem(this._app, dragSystem, petSystem))
       .addSystem(this._customSkin); // ← після RenderSystem бо Spine вже оновлений
@@ -668,12 +697,13 @@ export class Game {
       .add('skeleton', '/assets/skeleton.json')
       .load((_, resources) => {
         this._skeletonData = resources.skeleton.spineData;
-        this._catEntity = createCat(this._app, this._skeletonData, dragSystem, petSystem);
+        this._catEntity = createCat(this._app, this._skeletonData, dragSystem, petSystem, this._worldLayer);
         this._world.addEntity(this._catEntity);
 
         this._app.ticker.add((delta) => {
           this._world.tick(delta);
           this._updateSceneFlow();
+          this._tickTower(this._app.ticker.elapsedMS);
           this._tickMiniGame(this._app.ticker.elapsedMS);
           this._tickLocalState();
           this._tickRemotePlayers();
@@ -717,6 +747,7 @@ export class Game {
     this._app.renderer.resize(CONFIG.WIDTH, CONFIG.HEIGHT);
     this._drawBackground();
     this._renderSceneObjects();
+    this._resetTower();
     this._clearCoins();
     this._lastCoinSpawnAt = Date.now();
     this._activeRopeId = null;
@@ -864,6 +895,7 @@ export class Game {
     this._activePlatformId = null;
     this._drawBackground();
     this._renderSceneObjects();
+    this._resetTower();
     this._clearCoins();
     this._lastCoinSpawnAt = Date.now();
     this._refreshRemoteVisibility();
@@ -893,19 +925,13 @@ export class Game {
     });
 
     const scene = getSceneRoom(this._sceneRoomId);
-    this._scenePlatforms = (scene.platforms || []).map((platform) => {
+    this._basePlatforms = (scene.platforms || []).map((platform) => {
       const x = Math.round(CONFIG.WIDTH * platform.xRatio);
       const y = Math.round(CONFIG.HEIGHT * platform.yRatio);
       const width = Math.max(82, Math.round(platform.width || 130));
       const halfW = width / 2;
 
-      const body = new PIXI.Graphics();
-      body.beginFill(0x2a415f, 0.96);
-      body.drawRoundedRect(-halfW, -PLATFORM_THICKNESS / 2, width, PLATFORM_THICKNESS, 8);
-      body.endFill();
-      body.lineStyle(2, 0x9ed8ff, 0.85);
-      body.moveTo(-halfW + 6, -2);
-      body.lineTo(halfW - 6, -2);
+      const body = this._createPlatformGfx(width);
       body.x = x;
       body.y = y;
       this._sceneObjectLayer.addChild(body);
@@ -917,6 +943,7 @@ export class Game {
         width,
         x1: x - halfW,
         x2: x + halfW,
+        gfx: body,
       };
     });
 
@@ -981,6 +1008,8 @@ export class Game {
         height: item.height,
       };
     });
+
+    this._syncScenePlatforms();
   }
 
   _findNearbyInteractable(tf) {
@@ -1010,7 +1039,8 @@ export class Game {
 
     const scene = getSceneRoom(this._sceneRoomId);
     const now = Date.now();
-    const canTransition = now - this._lastSceneTransitionAt > SCENE_TRANSITION_COOLDOWN_MS;
+    const inTower = tf.y < CONFIG.FLOOR_Y - TOWER_START_OFFSET_PX;
+    const canTransition = !inTower && now - this._lastSceneTransitionAt > SCENE_TRANSITION_COOLDOWN_MS;
 
     if (canTransition) {
       if (scene.leftTo && tf.x <= SCENE_EDGE_THRESHOLD_PX && this._inputSystem.isLeft()) {
@@ -1281,10 +1311,16 @@ export class Game {
     }
   }
 
-  _getCoinSpawnPoint() {
+  _getCoinSpawnPoint(tf) {
     const candidates = [];
+    const minY = tf ? tf.y - 280 : Number.NEGATIVE_INFINITY;
+    const maxY = tf ? tf.y + 480 : Number.POSITIVE_INFINITY;
+    const nearbyPlatforms = this._scenePlatforms.filter(
+      (platform) => platform.y >= minY && platform.y <= maxY
+    );
+    const platformPool = nearbyPlatforms.length > 0 ? nearbyPlatforms : this._scenePlatforms;
 
-    this._scenePlatforms.forEach((platform) => {
+    platformPool.forEach((platform) => {
       const innerWidth = Math.max(20, platform.width - 36);
       const left = platform.x - innerWidth / 2;
       const x = Math.round(left + Math.random() * innerWidth);
@@ -1294,20 +1330,22 @@ export class Game {
       });
     });
 
-    const minX = 32;
-    const maxX = Math.max(minX + 60, CONFIG.WIDTH - 32);
-    candidates.push({
-      x: Math.round(minX + Math.random() * (maxX - minX)),
-      y: CONFIG.FLOOR_Y - 20,
-    });
+    if (CONFIG.FLOOR_Y >= minY && CONFIG.FLOOR_Y <= maxY) {
+      const minX = 32;
+      const maxX = Math.max(minX + 60, CONFIG.WIDTH - 32);
+      candidates.push({
+        x: Math.round(minX + Math.random() * (maxX - minX)),
+        y: CONFIG.FLOOR_Y - 20,
+      });
+    }
 
     return candidates[Math.floor(Math.random() * candidates.length)] || null;
   }
 
-  _spawnCoin() {
+  _spawnCoin(tf) {
     if (!this._coinLayer || this._coins.length >= COIN_MAX_ACTIVE) return false;
 
-    const spawn = this._getCoinSpawnPoint();
+    const spawn = this._getCoinSpawnPoint(tf);
     if (!spawn) return false;
 
     const gfx = new PIXI.Graphics();
@@ -1414,7 +1452,7 @@ export class Game {
     this._applyNeedEffects(now);
     if (now - this._lastCoinSpawnAt >= COIN_SPAWN_INTERVAL_MS) {
       this._lastCoinSpawnAt = now;
-      const spawned = this._spawnCoin();
+      const spawned = this._spawnCoin(tf);
       if (spawned) {
         this._emitMiniGameState(true);
       }
@@ -1443,7 +1481,343 @@ export class Game {
       this._emitMiniGameState(true);
     }
 
+    const collectedPickups = this._collectTowerPickups(tf);
+    if (collectedPickups > 0) {
+      this._emitMiniGameState(true);
+    }
+
+    if (Math.min(this._economy.food, this._economy.water) <= 0) {
+      this._handleNeedsEmpty();
+      return;
+    }
+
     this._emitMiniGameState();
+  }
+
+  _tickTower() {
+    if (!this._catEntity) return;
+
+    const tf = this._catEntity.get(TransformComponent);
+    if (!tf) return;
+
+    this._updateCamera(tf);
+    this._ensureTowerPlatforms(tf);
+    this._cullTowerPlatforms(tf);
+  }
+
+  _updateCamera(tf) {
+    if (!this._worldLayer) return;
+
+    const climbStartY = CONFIG.FLOOR_Y - TOWER_START_OFFSET_PX;
+    const targetOffset = tf.y < climbStartY ? TOWER_TARGET_SCREEN_Y - tf.y : 0;
+    this._cameraOffsetY = lerp(this._cameraOffsetY, targetOffset, TOWER_CAMERA_LERP);
+    this._worldLayer.y = Math.round(this._cameraOffsetY);
+  }
+
+  _syncScenePlatforms() {
+    const towerPlatforms = this._towerState?.platforms || [];
+    this._scenePlatforms = (this._basePlatforms || []).concat(towerPlatforms);
+  }
+
+  _resetTower() {
+    this._clearTowerPlatforms();
+    this._clearTowerPickups();
+
+    const basePlatforms = this._basePlatforms || [];
+    const highestBase = basePlatforms.length > 0
+      ? Math.min(...basePlatforms.map((platform) => platform.y))
+      : CONFIG.FLOOR_Y;
+    const tf = this._catEntity?.get(TransformComponent);
+    const lastX = tf?.x ?? CONFIG.WIDTH / 2;
+
+    this._towerState = {
+      platforms: [],
+      pickups: [],
+      nextPlatformId: 0,
+      nextPickupId: 0,
+      highestY: highestBase,
+      lastX,
+    };
+
+    const initialCount = Math.max(6, Math.round(CONFIG.HEIGHT / 78));
+    for (let i = 0; i < initialCount; i += 1) {
+      this._spawnTowerPlatform();
+    }
+
+    this._cameraOffsetY = 0;
+    if (this._worldLayer) {
+      this._worldLayer.y = 0;
+    }
+
+    this._syncScenePlatforms();
+  }
+
+  _clearTowerPlatforms() {
+    if (!this._towerState?.platforms) return;
+
+    this._towerState.platforms.forEach((platform) => {
+      platform.gfx?.parent?.removeChild(platform.gfx);
+      platform.gfx?.destroy({ children: true, texture: false, baseTexture: false });
+    });
+    this._towerState.platforms = [];
+  }
+
+  _clearTowerPickups() {
+    if (!this._towerState?.pickups) return;
+
+    this._towerState.pickups.forEach((pickup) => {
+      pickup.gfx?.parent?.removeChild(pickup.gfx);
+      pickup.gfx?.destroy({ children: true, texture: false, baseTexture: false });
+    });
+    this._towerState.pickups = [];
+  }
+
+  _ensureTowerPlatforms(tf) {
+    if (!this._towerState) return;
+
+    const spawnTargetY = tf.y - TOWER_SPAWN_AHEAD_PX;
+    while (this._towerState.highestY > spawnTargetY) {
+      this._spawnTowerPlatform();
+    }
+
+    this._syncScenePlatforms();
+  }
+
+  _spawnTowerPlatform() {
+    if (!this._sceneObjectLayer || !this._towerState) return null;
+
+    const width = Math.round(
+      TOWER_PLATFORM_MIN_WIDTH
+        + Math.random() * (TOWER_PLATFORM_MAX_WIDTH - TOWER_PLATFORM_MIN_WIDTH)
+    );
+    const halfW = width / 2;
+    const minX = TOWER_SIDE_PADDING + halfW;
+    const maxX = Math.max(minX + 40, CONFIG.WIDTH - TOWER_SIDE_PADDING - halfW);
+    const prevX = Number.isFinite(this._towerState.lastX) ? this._towerState.lastX : CONFIG.WIDTH / 2;
+    const stepX = (Math.random() * 2 - 1) * 180;
+    const x = Math.round(Math.max(minX, Math.min(maxX, prevX + stepX)));
+    const gap = Math.round(
+      TOWER_PLATFORM_MIN_GAP
+        + Math.random() * (TOWER_PLATFORM_MAX_GAP - TOWER_PLATFORM_MIN_GAP)
+    );
+    const y = Math.round(this._towerState.highestY - gap);
+
+    const gfx = this._createPlatformGfx(width);
+    gfx.x = x;
+    gfx.y = y;
+    this._sceneObjectLayer.addChild(gfx);
+
+    const platform = {
+      id: `tower-p${this._towerState.nextPlatformId += 1}`,
+      x,
+      y,
+      width,
+      x1: x - halfW,
+      x2: x + halfW,
+      gfx,
+      isTower: true,
+    };
+
+    this._towerState.platforms.push(platform);
+    this._towerState.highestY = y;
+    this._towerState.lastX = x;
+
+    this._maybeSpawnTowerPickup(platform);
+    return platform;
+  }
+
+  _maybeSpawnTowerPickup(platform) {
+    if (!this._pickupLayer || !this._towerState) return;
+
+    const roll = Math.random();
+    let type = null;
+    if (roll < TOWER_PICKUP_FOOD_CHANCE) {
+      type = 'food';
+    } else if (roll < TOWER_PICKUP_FOOD_CHANCE + TOWER_PICKUP_WATER_CHANCE) {
+      type = 'water';
+    }
+
+    if (!type) return;
+
+    const innerWidth = Math.max(18, platform.width - 32);
+    const x = Math.round(platform.x - innerWidth / 2 + Math.random() * innerWidth);
+    const y = Math.round(platform.y - 22);
+
+    const gfx = this._createTowerPickupGfx(type);
+    gfx.x = x;
+    gfx.y = y;
+    this._pickupLayer.addChild(gfx);
+
+    this._towerState.pickups.push({
+      id: `tower-${type}-${this._towerState.nextPickupId += 1}`,
+      type,
+      x,
+      y,
+      gfx,
+    });
+  }
+
+  _createPlatformGfx(width) {
+    const halfW = width / 2;
+    const body = new PIXI.Graphics();
+    body.beginFill(0x2a415f, 0.96);
+    body.drawRoundedRect(-halfW, -PLATFORM_THICKNESS / 2, width, PLATFORM_THICKNESS, 8);
+    body.endFill();
+    body.lineStyle(2, 0x9ed8ff, 0.85);
+    body.moveTo(-halfW + 6, -2);
+    body.lineTo(halfW - 6, -2);
+    return body;
+  }
+
+  _createTowerPickupGfx(type) {
+    const gfx = new PIXI.Graphics();
+
+    if (type === 'food') {
+      gfx.beginFill(0xffb86a, 0.95);
+      gfx.drawRoundedRect(-10, -6, 20, 12, 4);
+      gfx.endFill();
+      gfx.lineStyle(2, 0xffe2b9, 0.9);
+      gfx.drawRoundedRect(-10, -6, 20, 12, 4);
+      gfx.beginFill(0xffe2b9, 0.7);
+      gfx.drawCircle(0, -9, 4);
+      gfx.endFill();
+    } else {
+      gfx.beginFill(0x6fcad4, 0.95);
+      gfx.drawCircle(0, -2, 7);
+      gfx.endFill();
+      gfx.lineStyle(2, 0xd9fafd, 0.9);
+      gfx.drawCircle(0, -2, 7);
+    }
+
+    return gfx;
+  }
+
+  _cullTowerPlatforms(tf) {
+    if (!this._towerState) return;
+
+    const cutoffY = tf.y + TOWER_CULL_BELOW_PX;
+    let changed = false;
+
+    for (let index = this._towerState.platforms.length - 1; index >= 0; index -= 1) {
+      const platform = this._towerState.platforms[index];
+      if (platform.y <= cutoffY) continue;
+
+      if (platform.id === this._activePlatformId) {
+        this._activePlatformId = null;
+      }
+
+      platform.gfx?.parent?.removeChild(platform.gfx);
+      platform.gfx?.destroy({ children: true, texture: false, baseTexture: false });
+      this._towerState.platforms.splice(index, 1);
+      changed = true;
+    }
+
+    for (let index = this._towerState.pickups.length - 1; index >= 0; index -= 1) {
+      const pickup = this._towerState.pickups[index];
+      if (pickup.y <= cutoffY) continue;
+
+      pickup.gfx?.parent?.removeChild(pickup.gfx);
+      pickup.gfx?.destroy({ children: true, texture: false, baseTexture: false });
+      this._towerState.pickups.splice(index, 1);
+    }
+
+    if (changed) {
+      this._syncScenePlatforms();
+    }
+  }
+
+  _collectTowerPickups(tf) {
+    if (!this._towerState || this._towerState.pickups.length === 0) return 0;
+
+    let collected = 0;
+    for (let index = this._towerState.pickups.length - 1; index >= 0; index -= 1) {
+      const pickup = this._towerState.pickups[index];
+      const distance = Math.hypot(tf.x - pickup.x, tf.y - pickup.y);
+      if (distance > TOWER_PICKUP_RADIUS_PX) continue;
+
+      let gain = 0;
+      let message = '';
+      let label = '';
+
+      if (pickup.type === 'food') {
+        gain = this._refillNeed('food', TOWER_PICKUP_FOOD_REFILL);
+        if (gain <= 0) continue;
+        label = 'Food';
+        message = `Snack +${Math.round(gain)} food.`;
+      } else {
+        gain = this._refillNeed('water', TOWER_PICKUP_WATER_REFILL);
+        if (gain <= 0) continue;
+        label = 'Water';
+        message = `Sip +${Math.round(gain)} water.`;
+      }
+
+      pickup.gfx?.parent?.removeChild(pickup.gfx);
+      pickup.gfx?.destroy({ children: true, texture: false, baseTexture: false });
+      this._towerState.pickups.splice(index, 1);
+      collected += 1;
+
+      this.setLocalChatBubble(message);
+      if (this._onInteract) {
+        this._onInteract({
+          roomId: this._sceneRoomId,
+          objectId: pickup.type,
+          label,
+          message,
+          personalOnly: true,
+        });
+      }
+    }
+
+    return collected;
+  }
+
+  _handleNeedsEmpty() {
+    this._economy.food = TOWER_RESET_FOOD;
+    this._economy.water = TOWER_RESET_WATER;
+    this._economy.sleep = Math.max(this._economy.sleep, TOWER_RESET_SLEEP);
+    this._nextNeedMeowAt = 0;
+
+    this._teleportToBase();
+    this._applyNeedEffects(Date.now());
+
+    const message = 'Out of food or water. Returned to the base.';
+    this.setLocalChatBubble(message);
+    if (this._onInteract) {
+      this._onInteract({
+        roomId: this._sceneRoomId,
+        objectId: 'needs-reset',
+        label: 'Needs',
+        message,
+        personalOnly: true,
+      });
+    }
+
+    this._emitMiniGameState(true);
+  }
+
+  _teleportToBase() {
+    if (!this._catEntity) return;
+
+    const tf = this._catEntity.get(TransformComponent);
+    const phys = this._catEntity.get(PhysicsComponent);
+    const spine = this._catEntity.get(SpineComponent);
+    if (!tf) return;
+
+    const floorOffset = spine?.floorOffset ?? 0;
+    const scaleY = spine?.instance?.scale?.y ?? 0.5;
+    tf.y = CONFIG.FLOOR_Y - floorOffset * Math.abs(scaleY);
+    tf.x = Math.min(CONFIG.WIDTH - 54, Math.max(54, tf.x));
+    if (phys) {
+      phys.vx = 0;
+      phys.vy = 0;
+      phys.onGround = true;
+    }
+
+    this._activeRopeId = null;
+    this._activePlatformId = null;
+    this._lastCatY = tf.y;
+
+    this._resetTower();
   }
 
   _refreshRemoteVisibility() {
@@ -1566,7 +1940,8 @@ export class Game {
     container.addChild(label);
     container.x = initialX;
     container.y = initialY;
-    this._app.stage.addChild(container);
+    const parent = this._worldLayer || this._app.stage;
+    parent.addChild(container);
 
     return {
       container,
@@ -1723,13 +2098,27 @@ export class Game {
 
     if (!this._floor) {
       this._floor = new PIXI.Graphics();
-      this._app.stage.addChild(this._floor);
+    }
+
+    if (this._worldLayer && this._worldLayer.parent !== this._app.stage) {
+      this._app.stage.addChild(this._worldLayer);
+    }
+
+    const floorParent = this._worldLayer || this._app.stage;
+    if (this._floor.parent !== floorParent) {
+      this._floor.parent?.removeChild(this._floor);
+      floorParent.addChild(this._floor);
     }
 
     this._app.stage.setChildIndex(this._bg, 0);
     this._app.stage.setChildIndex(this._stars, 1);
     this._app.stage.setChildIndex(this._haze, 2);
-    this._app.stage.setChildIndex(this._floor, 3);
+    if (this._worldLayer) {
+      this._app.stage.setChildIndex(this._worldLayer, 3);
+      this._worldLayer.setChildIndex(this._floor, 0);
+    } else {
+      this._app.stage.setChildIndex(this._floor, 3);
+    }
 
     this._bg.clear();
     const skyHeight = Math.round(CONFIG.HEIGHT * 0.6);

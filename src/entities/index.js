@@ -180,7 +180,7 @@ export class HeartComponent extends Component {
 
 // ── Factories ─────────────────────────────────────────────────────
 // Створюють готові ECS entities для Game.js
-export const createBall = (app, dragSystem, x, y) => {
+export const createBall = (app, dragSystem, x, y, parent = null) => {
   const ball = new Entity('ball')
     .add(new BallComponent())
     .add(new TransformComponent({ x, y }))
@@ -206,12 +206,13 @@ export const createBall = (app, dragSystem, x, y) => {
   render.pixi.hitArea = new PIXI.Circle(x, y, CONFIG.BALL_RADIUS * 1.5);
   render.pixi.on('pointerdown', (e) => dragSystem?.startDrag(ball, e));
 
-  app.stage.addChild(render.shadow);
-  app.stage.addChild(render.pixi);
+  const target = parent || app.stage;
+  target.addChild(render.shadow);
+  target.addChild(render.pixi);
   return ball;
 };
 
-export const createCat = (app, spineData, dragSystem, petSystem) => {
+export const createCat = (app, spineData, dragSystem, petSystem, parent = null) => {
   const cat = new Entity('cat')
     .add(new CatComponent())
     .add(new TransformComponent({
@@ -263,7 +264,8 @@ export const createCat = (app, spineData, dragSystem, petSystem) => {
   instance.on('pointerdown', (e) => dragSystem?.startDrag(cat, e));
   instance.on('pointermove', () => petSystem?.onPetMove(cat));
 
-  app.stage.addChild(container);
+  const target = parent || app.stage;
+  target.addChild(container);
   return cat;
 };
 
